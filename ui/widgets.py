@@ -8,7 +8,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QGraphicsDropShadowEffect
 
-from estilos import (
+from ui.estilos import (
     VERDE, CINZA, BRANCO, BORDA,
     TEXTO_PRIM, TEXTO_SEC, TEXTO_TERT,
     CINZA_LIGHT, VERDE_LIGHT,
@@ -75,7 +75,7 @@ class ItemArquivo(QWidget):
         layout.addWidget(self._lbl_nome, stretch=1)
 
         # Tipo à direita (pill discreta)
-        from estilos import NOMES_PT
+        from ui.estilos import NOMES_PT
         tipo_str = NOMES_PT.get(tipo, tipo)
         lbl_tipo = QLabel(tipo_str)
         lbl_tipo.setStyleSheet(

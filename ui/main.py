@@ -9,13 +9,18 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, pyqtSignal, QObject, QThread
 from PyQt5.QtGui import QFont, QPixmap, QColor
 
-from logica import detectar_usuario, escanear_backup, detectar_conflitos, restaurar_arquivos, gerar_preview
-from estilos import (
+from core.deteccao   import detectar_usuario
+from core.escaneamento import escanear_backup
+from core.conflitos  import detectar_conflitos
+from core.restauracao import restaurar_arquivos
+from modules.preview import gerar_preview
+from modules.log     import salvar_log
+from ui.estilos import (
     VERDE, VERDE_HOVER, VERDE_LIGHT, CINZA, CINZA_LIGHT,
     BRANCO, FUNDO, TEXTO_PRIM, TEXTO_SEC, TEXTO_TERT, BORDA,
     ITEM_BORDA_ON,
 )
-from widgets import LinhaPasta, LinhaArquivo, _sombra
+from ui.widgets import LinhaPasta, LinhaArquivo, _sombra
 
 
 # ── Workers ───────────────────────────────────────────────────────────────────
@@ -284,7 +289,7 @@ class App(QMainWindow):
 
         row_layout.addWidget(self._card_op, stretch=1)
 
-    def _linha_op(self, label, valor, ultimo=False, negrito=False, cor_valor=None, is_sep=False):
+    def _linha_op(self, label, valor, ultimo=False, negrito=False, cor_valor=None):
         """Cria uma linha no card de operação e retorna o QLabel do valor."""
         row = QWidget()
         row.setStyleSheet("background: transparent;")
@@ -310,7 +315,6 @@ class App(QMainWindow):
 
         self.op_frame_layout.addWidget(row)
 
-        # separador fino entre linhas (exceto a última)
         if not ultimo:
             div = QFrame()
             div.setFrameShape(QFrame.HLine)
@@ -321,21 +325,22 @@ class App(QMainWindow):
         return val
 
     def _preencher_preview(self, preview):
-        """Monta o card 'INFORMAÇÕES DA OPERAÇÃO' e guarda refs para atualização."""
-        from estilos import NOMES_PT
+        """Monta o card 'INFORMAÇÕES DA OPERAÇÃO'. Se preview for None, exibe mensagem simples."""
+        if preview is None:
+            self._linha_op("Preview", "desativado", ultimo=True)
+            return
 
-        # ── Guarda todos os tipos conhecidos (ordenados) para criar as linhas ─
-        self._tipos_op = sorted(preview["por_tipo"].keys())
+        from ui.estilos import NOMES_PT
 
-        # Labels de valor por tipo  {tipo: QLabel}
-        self._lbl_op_tipo: dict = {}
+        self._tipos_op     = sorted(preview["por_tipo"].keys())
+        self._lbl_op_tipo  = {}
+
         for tipo in self._tipos_op:
-            dados   = preview["por_tipo"][tipo]
             nome_pt = NOMES_PT.get(tipo, tipo)
             lbl     = self._linha_op(nome_pt, "")
             self._lbl_op_tipo[tipo] = lbl
 
-        # Separador temático entre tipos e totais
+        # Separador entre tipos e totais
         sep_wrapper = QWidget()
         sep_wrapper.setStyleSheet("background: transparent;")
         sep_wrapper.setFixedHeight(10)
@@ -348,30 +353,29 @@ class App(QMainWindow):
         sep_h.addWidget(sep_line)
         self.op_frame_layout.addWidget(sep_wrapper)
 
-        # Labels fixos (total, espaço, tempo)
-        self._lbl_op_total   = self._linha_op("Total",          "", negrito=True)
-        self._lbl_op_espaco  = self._linha_op("Espaço livre",   "")
-        self._lbl_op_tempo   = self._linha_op("Tempo estimado", "", ultimo=True)
+        self._lbl_op_total  = self._linha_op("Total",          "", negrito=True)
+        self._lbl_op_espaco = self._linha_op("Espaço livre",   "")
+        self._lbl_op_tempo  = self._linha_op("Tempo estimado", "", ultimo=True)
 
-        # Preenche valores iniciais
         self._atualizar_preview(preview)
 
     def _atualizar_preview(self, preview=None):
         """Recalcula e atualiza os valores do painel com os arquivos selecionados."""
-        from estilos import NOMES_PT
+        if not hasattr(self, "_lbl_op_total"):
+            return
+
+        from ui.estilos import NOMES_PT
 
         if preview is None:
-            arquivos_sel = self._arquivos_selecionados()
-            preview = gerar_preview(arquivos_sel, self.conflitos)
+            preview = gerar_preview(self._arquivos_selecionados(), self.conflitos)
 
-        # Atualiza linhas por tipo
+        if preview is None:
+            return
+
         for tipo, lbl in self._lbl_op_tipo.items():
             dados = preview["por_tipo"].get(tipo)
             if dados and dados["qtd"] > 0:
-                plural  = "s" if dados["qtd"] != 1 else ""
-                qtd_str = f"{dados['qtd']} arq."
-                tam_str = self._fmt(dados["tamanho"])
-                lbl.setText(f"{qtd_str}  ·  {tam_str}")
+                lbl.setText(f"{dados['qtd']} arq.  ·  {self._fmt(dados['tamanho'])}")
                 lbl.setStyleSheet(
                     f"font-size: 11px; font-weight: 500; color: {TEXTO_PRIM}; "
                     f"background: transparent; border: none;"
@@ -383,28 +387,21 @@ class App(QMainWindow):
                     f"background: transparent; border: none;"
                 )
 
-        # Total
         total_qtd = preview["total_arquivos"]
         plural    = "s" if total_qtd != 1 else ""
-        self._lbl_op_total.setText(
-            f"{total_qtd} arquivo{plural}  ·  {preview['total_str']}"
-        )
+        self._lbl_op_total.setText(f"{total_qtd} arquivo{plural}  ·  {preview['total_str']}")
 
-        # Espaço livre
         if not preview["espaco_ok"]:
             self._lbl_op_espaco.setText(f"{preview['espaco_str']}  ⚠")
             self._lbl_op_espaco.setStyleSheet(
-                "font-size: 11px; font-weight: 600; color: #C0392B; "
-                "background: transparent; border: none;"
+                "font-size: 11px; font-weight: 600; color: #C0392B; background: transparent; border: none;"
             )
         else:
             self._lbl_op_espaco.setText(f"{preview['espaco_str']}  ✓")
             self._lbl_op_espaco.setStyleSheet(
-                "font-size: 11px; font-weight: 600; color: #1D9E75; "
-                "background: transparent; border: none;"
+                "font-size: 11px; font-weight: 600; color: #1D9E75; background: transparent; border: none;"
             )
 
-        # Tempo estimado
         self._lbl_op_tempo.setText(f"~{preview['tempo_min']} min")
 
     @staticmethod
@@ -494,28 +491,25 @@ class App(QMainWindow):
         self.lbl_resultado.setVisible(False)
         self.restore_layout.addWidget(self.lbl_resultado)
 
-    # ── Lógica de seleção ──────────────────────────────────────────────────────
+    # ── Lógica de seleção ─────────────────────────────────────────────────────
     def _selecionar_todos(self):
         for linha in self._linhas_arquivo:
             linha.selecionar_todos(True)
         self._atualizar_contagem()
         self._atualizar_botao_iniciar()
-        if hasattr(self, "_lbl_op_total"):
-            self._atualizar_preview()
+        self._atualizar_preview()
 
     def _desmarcar_todos(self):
         for linha in self._linhas_arquivo:
             linha.selecionar_todos(False)
         self._atualizar_contagem()
         self._atualizar_botao_iniciar()
-        if hasattr(self, "_lbl_op_total"):
-            self._atualizar_preview()
+        self._atualizar_preview()
 
     def _on_selecao_alterada(self):
         self._atualizar_contagem()
         self._atualizar_botao_iniciar()
-        if hasattr(self, "_lbl_op_total"):   # painel já foi montado
-            self._atualizar_preview()
+        self._atualizar_preview()
 
     def _atualizar_contagem(self):
         total = sum(l.total_itens() for l in self._linhas_arquivo)
@@ -524,7 +518,7 @@ class App(QMainWindow):
         self._lbl_contagem.setVisible(True)
 
     def _atualizar_botao_iniciar(self):
-        sel = sum(l.total_selecionados() for l in self._linhas_arquivo)
+        sel          = sum(l.total_selecionados() for l in self._linhas_arquivo)
         conflitos_ok = (not self.conflitos) or (len(self.decisoes) >= len(self.conflitos))
         self.btn_iniciar.setEnabled(sel > 0 and conflitos_ok)
 
@@ -549,36 +543,28 @@ class App(QMainWindow):
     def _preencher_info(self, arquivos):
         self.arquivos = arquivos
 
-        # Agrupa por pasta_relativa (hierarquia principal agora é a pasta)
         por_pasta = {}
         for arq in arquivos:
             pasta = arq.get("pasta_relativa", "") or ""
             por_pasta.setdefault(pasta, []).append({
-                "nome":  arq["nome"],
-                "tipo":  arq.get("tipo", "Outros"),
+                "nome": arq["nome"],
+                "tipo": arq.get("tipo", "Outros"),
             })
 
-        # Ordena: primeiro as pastas de nível 1 conhecidas, depois o resto alfabético
         ORDEM = ["Desktop", "Documents", "Downloads", "Pictures", "Videos", "Music"]
         def _chave_pasta(p):
             raiz = p.replace("\\", "/").split("/")[0]
-            try:
-                return (0, ORDEM.index(raiz), p)
-            except ValueError:
-                return (1, 0, p)
+            try:    return (0, ORDEM.index(raiz), p)
+            except: return (1, 0, p)
 
-        pastas_ordenadas = sorted(por_pasta.keys(), key=_chave_pasta)
-
-        for i, pasta in enumerate(pastas_ordenadas):
+        for i, pasta in enumerate(sorted(por_pasta.keys(), key=_chave_pasta)):
             linha = LinhaPasta(pasta, por_pasta[pasta], on_selecao_alterada=self._on_selecao_alterada)
             self._linhas_arquivo.append(linha)
-
             if i > 0:
                 sep = QFrame()
                 sep.setFrameShape(QFrame.HLine)
                 sep.setStyleSheet(f"color: {BORDA}; background: {BORDA}; max-height: 1px; border: none;")
                 self.scroll_layout.addWidget(sep)
-
             self.scroll_layout.addWidget(linha)
 
         self.btn_sel_todos.setVisible(True)
@@ -648,7 +634,6 @@ class App(QMainWindow):
             btns_layout.addWidget(btn_subst)
             btns_layout.addStretch()
             item_layout.addWidget(btns)
-
             self.conflitos_layout.addWidget(item)
 
             def fazer_escolha(escolha, c=caminho, bm=btn_manter, bs=btn_subst):
@@ -680,22 +665,34 @@ class App(QMainWindow):
         self.lbl_prog.setText(f"Copiando: {nome_arquivo}")
 
     def _finalizar(self, resultado):
+        r = resultado
+
+        salvar_log(r, self.arquivos, self.matricula)
+
+        if r.get("rollback"):
+            self.barra.setValue(0)
+            self.lbl_pct.setText("0%")
+            self.lbl_prog.setText("Operação cancelada")
+            self.btn_iniciar.setEnabled(True)
+            self.btn_iniciar.setText("Tentar novamente")
+            self.lbl_resultado.setVisible(True)
+            self.lbl_resultado.setStyleSheet("font-size: 12px; color: #C0392B; border: none;")
+            self.lbl_resultado.setText(
+                f"⚠  Erro durante a restauração — operação desfeita.\n"
+                f"Nenhum arquivo foi alterado. O backup permanece intacto.\n"
+                f"Detalhe: {r['erro_msg']}"
+            )
+            return
+
         self.barra.setValue(100)
         self.lbl_pct.setText("100%")
         self.lbl_prog.setText("Concluído")
         self.btn_iniciar.setText("✓  Restauração concluída")
-        r = resultado
         self.lbl_resultado.setVisible(True)
+        self.lbl_resultado.setStyleSheet(f"font-size: 12px; color: {VERDE}; border: none;")
         self.lbl_resultado.setText(
             f"✔  {r['restaurados']} arquivo(s) restaurado(s)  ·  "
             f"{r['ignorados']} ignorado(s)  ·  "
             f"{r['erros']} erro(s)\n"
             f"Chamado registrado: #{r['chamado']}"
         )
-
-
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    janela = App()
-    janela.show()
-    sys.exit(app.exec_())
