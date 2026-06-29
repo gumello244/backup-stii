@@ -1,0 +1,5 @@
+PyQt5
+httpx
+pywin32
+pyinstaller
+nuitka
