@@ -153,6 +153,12 @@ class TestConfirmView(unittest.TestCase):
         view._select_all()
         self.assertEqual(len(view._selected_folders()), 2)
 
+        # Verify folder selection card minimum and maximum height constraints
+        self.assertEqual(view._folder_card.minimumHeight(), 166)
+        self.assertEqual(view._folder_card.maximumHeight(), 166)
+
+
+
 
 class TestSummaryView(unittest.TestCase):
     """Tests for the SummaryView component."""

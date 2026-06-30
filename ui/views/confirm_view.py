@@ -249,9 +249,13 @@ class ConfirmView(QWidget):
         self._checkboxes.clear()
         for name, summary in sorted(self._merged.by_folder.items()):
             self._add_folder_checkbox(name, summary)
-        # Dynamically scale right side bento card up to maximum left side height
+        min_height = 146
         calculated_height = 54 + len(self._checkboxes) * 32
-        self._folder_card.setMaximumHeight(min(calculated_height, 280))
+        target_height = max(calculated_height, min_height)
+        self._folder_card.setMinimumHeight(min_height)
+        self._folder_card.setMaximumHeight(min(target_height, 280))
+
+
 
     def _clear_folder_layout(self) -> None:
         """Clear all child widgets inside the folder layout."""
