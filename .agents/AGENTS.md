@@ -9,6 +9,15 @@
 - No code duplication. Extract shared logic into a function/module.
 - Early returns over nested ifs. Max 2 levels of indentation.
 - Exception messages must include the offending value and expected shape.
+- Use the project's languages best practices.
+- Follow Clean Code's principles.
+- Do not abstract before needing to.
+
+## Design System (DESIGN.md)
+
+- **Token Compliance**: All UI styles, layouts, margins, typography, shapes, and colors MUST strictly align with the design tokens defined in [DESIGN.md].
+- **No Ad-hoc Styles**: Do not use hardcoded hex values, margins, or font families outside of the specified token system.
+- **Update Design Document**: If changes are made to the design system (e.g., introducing a new component type or changing color roles), update [DESIGN.md] first to ensure future sessions keep full context.
 
 ## Comments
 
@@ -46,5 +55,5 @@
 
 ## Logging
 
-- Structured JSON when logging for debugging / observability.
+- Use structured TOON (Token-Oriented Object Notation) formats for file/debug logs to optimize agent context window usage. Standard structured JSON remains the default fallback.
 - Plain text only for user-facing CLI output.
