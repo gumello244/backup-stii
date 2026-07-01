@@ -131,3 +131,80 @@ class TestBackupMerger(unittest.TestCase):
         self.assertEqual(len(merged.files), 0)
         self.assertEqual(merged.total_bytes, 0)
         self.assertEqual(merged.source_summary, "Nenhuma")
+
+    def test_index_source_raiz(self) -> None:
+        """Verify _index_source correctly maps and indexes the RAIZ folder parallel to USUARIOS."""
+        fs = {
+            "source/USUARIOS/14029/Desktop/file1.txt": {"size": 100, "mtime": 10.0},
+            "source/RAIZ/rootfile.exe": {"size": 500, "mtime": 50.0},
+        }
+        fs["source/RAIZ"] = {"is_dir": True}
+        fs["source/USUARIOS"] = {"is_dir": True}
+        fs["source/USUARIOS/14029"] = {"is_dir": True}
+        fs["source/USUARIOS/14029/Desktop"] = {"is_dir": True}
+
+        source_path = FakePath("source/USUARIOS/14029", fs)
+        source = BackupSource(
+            path=source_path,  # type: ignore
+            origin="local",
+            machine_id="PMC_1",
+            total_bytes=600,
+            folder_list=["Desktop", "RAIZ"]
+        )
+
+        idx = _index_source(source)
+        self.assertEqual(len(idx), 2)
+        self.assertIn(("Desktop", "file1.txt"), idx)
+        self.assertIn(("RAIZ", "rootfile.exe"), idx)
+
+        raiz_entry = idx[("RAIZ", "rootfile.exe")]
+        self.assertEqual(raiz_entry.size_bytes, 500)
+        self.assertEqual(raiz_entry.modified_time, 50.0)
+
+    def test_merge_sources_parallel(self) -> None:
+        """Verify merge_sources works with parallel processing of multiple sources in normal mode."""
+        fs1 = {"s1/Desktop/file1.txt": {"size": 10, "mtime": 1.0}}
+        fs2 = {"s2/Desktop/file2.txt": {"size": 20, "mtime": 2.0}}
+        s1 = BackupSource(
+            path=FakePath("s1", fs1),  # type: ignore
+            origin="local",
+            machine_id="PMC_1",
+            total_bytes=10,
+            folder_list=["Desktop"]
+        )
+        s2 = BackupSource(
+            path=FakePath("s2", fs2),  # type: ignore
+            origin="network",
+            machine_id="PMC_1",
+            total_bytes=20,
+            folder_list=["Desktop"]
+        )
+        res = merge_sources([s1, s2], admin_mode=False)
+        self.assertEqual(len(res.files), 1)
+        self.assertEqual(res.total_bytes, 20)
+        self.assertEqual(res.source_summary, "Rede")
+
+    def test_merge_sources_admin_mode(self) -> None:
+        """Verify merge_sources merges multiple sources when admin_mode is True."""
+        fs1 = {"s1/Desktop/file1.txt": {"size": 10, "mtime": 1.0}}
+        fs2 = {"s2/Desktop/file2.txt": {"size": 20, "mtime": 2.0}}
+        s1 = BackupSource(
+            path=FakePath("s1", fs1),  # type: ignore
+            origin="local",
+            machine_id="PMC_1",
+            total_bytes=10,
+            folder_list=["Desktop"]
+        )
+        s2 = BackupSource(
+            path=FakePath("s2", fs2),  # type: ignore
+            origin="network",
+            machine_id="PMC_1",
+            total_bytes=20,
+            folder_list=["Desktop"]
+        )
+        res = merge_sources([s1, s2], admin_mode=True)
+        self.assertEqual(len(res.files), 2)
+        self.assertEqual(res.total_bytes, 30)
+        self.assertEqual(res.source_summary, "Mesclado (rede + local)")
+
+

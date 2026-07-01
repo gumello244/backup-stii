@@ -257,7 +257,7 @@ class MainWindow(QMainWindow):
     def _start_merge(self, sources: list[BackupSource]) -> None:
         """Run the merge worker in background."""
         self._analysis.set_merging()
-        worker = MergeSourcesWorker(sources)
+        worker = MergeSourcesWorker(sources, self._state.admin_mode)
         worker.finished.connect(self._on_merge_finished)
         self._workers.append(worker)
         worker.start()

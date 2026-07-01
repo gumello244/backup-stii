@@ -186,5 +186,37 @@ class TestSummaryView(unittest.TestCase):
         self.assertEqual(view._time_card._val_lbl.text(), "~15 segundos")
 
 
+class TestAnalysisView(unittest.TestCase):
+    """Tests for the AnalysisView layout and dimensions."""
+
+    def test_analysis_view_resolved_layout(self) -> None:
+        """Verify resolved grid has stacked cards with expected size constraints."""
+        from ui.views.analysis_view import AnalysisView
+        from services.backup_merger import MergedFileSet
+
+        view = AnalysisView()
+        merged = MergedFileSet(
+            files=[],
+            total_bytes=0,
+            by_folder={},
+            source_summary="Test Source Summary",
+        )
+        view.set_resolved(merged, admin_mode=False)
+
+        grid = view._state_layout.itemAt(0).widget()
+        self.assertEqual(grid._layout.count(), 2)
+
+        hero = grid._layout.itemAt(0).widget()
+        files = grid._layout.itemAt(1).widget()
+
+        self.assertEqual(hero.minimumWidth(), 320)
+        self.assertEqual(hero.maximumWidth(), 320)
+        self.assertEqual(hero.minimumHeight(), 100)
+        self.assertEqual(hero.maximumHeight(), 100)
+        self.assertEqual(files.minimumWidth(), 320)
+        self.assertEqual(files.maximumWidth(), 320)
+
+
 if __name__ == "__main__":
     unittest.main()
+

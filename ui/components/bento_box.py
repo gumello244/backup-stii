@@ -18,18 +18,25 @@ class BentoBox(QFrame):
         value: str,
         subtitle: str,
         variant: str = "default",
+        alignment: Qt.Alignment = Qt.AlignLeft | Qt.AlignVCenter,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._variant: str = variant
-        self._init_ui(title, value, subtitle)
+        self._init_ui(title, value, subtitle, alignment)
         self.set_variant(variant)
 
-    def _init_ui(self, title: str, value: str, subtitle: str) -> None:
+    def _init_ui(
+        self,
+        title: str,
+        value: str,
+        subtitle: str,
+        alignment: Qt.Alignment,
+    ) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 8, 16, 8)
         layout.setSpacing(2)
-        layout.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        layout.setAlignment(alignment)
 
         self._title_lbl = QLabel(title, self)
         self._title_lbl.setObjectName("BentoTitle")
@@ -46,9 +53,24 @@ class BentoBox(QFrame):
         self._val_lbl.setStyleSheet("background: transparent;")
         self._sub_lbl.setStyleSheet("background: transparent;")
 
+        self._apply_alignment(alignment)
+
         layout.addWidget(self._title_lbl)
         layout.addWidget(self._val_lbl)
         layout.addWidget(self._sub_lbl)
+
+    def _apply_alignment(self, alignment: Qt.Alignment) -> None:
+        """Apply horizontal alignment to internal labels based on card alignment."""
+        horiz = Qt.AlignLeft
+        if alignment & Qt.AlignHCenter:
+            horiz = Qt.AlignHCenter
+        elif alignment & Qt.AlignRight:
+            horiz = Qt.AlignRight
+
+        self._title_lbl.setAlignment(horiz | Qt.AlignVCenter)
+        self._val_lbl.setAlignment(horiz | Qt.AlignVCenter)
+        self._sub_lbl.setAlignment(horiz | Qt.AlignVCenter)
+
 
     def update_content(self, title: str, value: str, subtitle: str) -> None:
         """Update text contents of the bento card labels and toggle visibility."""

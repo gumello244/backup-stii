@@ -147,51 +147,52 @@ class AnalysisView(QWidget):
         self._state_layout.addWidget(panel)
 
     def _show_bento_grid(self, merged: MergedFileSet, admin_mode: bool) -> None:
-        """Construct the asymmetric 2x2 Bento grid."""
+        """Construct the Bento grid with hero and files cards stacked vertically."""
         self._clear_layout()
         grid = BentoGrid(spacing=8, parent=self)
 
-        # 1. Hero Card
+        hero = self._create_hero_card(merged, admin_mode)
+        files_card = self._create_files_card(merged)
+
+        grid.add_card(hero, 0, 0)
+        grid.add_card(files_card, 1, 0)
+
+        self._state_layout.addWidget(grid)
+
+    def _create_hero_card(self, merged: MergedFileSet, admin_mode: bool) -> BentoBox:
+        """Create and return the hero BentoBox card."""
         if admin_mode:
             hero = BentoBox(
                 title="FONTE",
                 value=merged.source_summary,
                 subtitle="Origem dos arquivos",
                 variant="hero",
+                alignment=Qt.AlignCenter,
                 parent=self,
             )
         else:
             hero = self._create_user_hero_box(merged)
+        hero.setFixedWidth(320)
+        hero.setFixedHeight(100)
+        return hero
 
-        # 2. Size Card
-        size_str = _format_bytes(merged.total_bytes)
-        size_card = BentoBox(
-            title="TAMANHO TOTAL",
-            value=size_str,
-            subtitle="Volume consolidado",
-            variant="default",
-            parent=self,
-        )
-
-        # 3. Files/Folders Card
+    def _create_files_card(self, merged: MergedFileSet) -> BentoBox:
+        """Create and return the files summary BentoBox card."""
         file_count = len(merged.files)
         folder_count = len(merged.by_folder)
         file_suffix = "arquivo" if file_count == 1 else "arquivos"
         folder_suffix = "pasta" if folder_count == 1 else "pastas"
-        files_card = BentoBox(
+        card = BentoBox(
             title="ENCONTRADOS",
             value=f"{file_count} {file_suffix}",
             subtitle=f"Em {folder_count} {folder_suffix}",
             variant="default",
+            alignment=Qt.AlignCenter,
             parent=self,
         )
+        card.setFixedWidth(320)
+        return card
 
-        # Layout spans: hero spans rows 0 and 1, others occupy column 1
-        grid.add_card(hero, 0, 0, rowspan=2, colspan=1)
-        grid.add_card(size_card, 0, 1, rowspan=1, colspan=1)
-        grid.add_card(files_card, 1, 1, rowspan=1, colspan=1)
-
-        self._state_layout.addWidget(grid)
 
     def _create_user_hero_box(self, merged: MergedFileSet) -> BentoBox:
         """Create date hero BentoBox for user mode."""
@@ -201,6 +202,7 @@ class AnalysisView(QWidget):
                 value="--/--/----",
                 subtitle="",
                 variant="hero",
+                alignment=Qt.AlignCenter,
                 parent=self,
             )
         newest_ts = max(f.modified_time for f in merged.files)
@@ -211,8 +213,10 @@ class AnalysisView(QWidget):
             value=day_month_year,
             subtitle="",
             variant="hero",
+            alignment=Qt.AlignCenter,
             parent=self,
         )
+
 
     # ------------------------------------------------------------------
     # State transitions (Public API)

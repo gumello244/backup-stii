@@ -112,13 +112,25 @@ def _build_source(user_path: Path, origin: str, machine_id: str) -> BackupSource
     Example:
         src = _build_source(Path("C:/"), "local", "PMC_12345")
     """
+    total = _calculate_dir_bytes(user_path)
+    folders = _list_subfolders(user_path)
+
+    try:
+        raiz_path = user_path.parent.parent / "RAIZ"
+        if raiz_path.is_dir():
+            total += _calculate_dir_bytes(raiz_path)
+            folders.append("RAIZ")
+    except (OSError, ValueError):
+        pass
+
     return BackupSource(
         path=user_path,
         origin=origin,
         machine_id=machine_id,
-        total_bytes=_calculate_dir_bytes(user_path),
-        folder_list=_list_subfolders(user_path),
+        total_bytes=total,
+        folder_list=folders,
     )
+
 
 
 def _extract_id_from_folder(folder_name: str) -> str:
@@ -318,13 +330,31 @@ def _find_local_matches(drive_root: Path, login: str) -> list[tuple[float, Path]
     return matches
 
 
+def get_local_drives() -> list[Path]:
+    """Return root Paths for all active Windows drive letters.
+
+    Example:
+        drives = get_local_drives()
+    """
+    import string
+    drives = []
+    for letter in string.ascii_uppercase:
+        drive = Path(f"{letter}:\\")
+        if drive.exists():
+            drives.append(drive)
+    return drives
+
+
 def scan_local_sources(login: str, admin_mode: bool = False) -> list[BackupSource]:
-    """Scan C:\\ non-system directories for login backups.
+    """Scan all active local drives for login backups.
 
     Example:
         sources = scan_local_sources("14029")
     """
-    matches = _find_local_matches(Path("C:\\"), login)
+    matches = []
+    for drive in get_local_drives():
+        matches.extend(_find_local_matches(drive, login))
+
     if not matches:
         return []
 
@@ -332,13 +362,14 @@ def scan_local_sources(login: str, admin_mode: bool = False) -> list[BackupSourc
 
     if admin_mode:
         return [
-            _build_source(path, "local", _extract_id_from_folder(path.parts[1]))
-            for _, path in matches
+            _build_source(p, "local", _extract_id_from_folder(p.parts[1]))
+            for _, p in matches
         ]
 
     _, path = matches[0]
     mid = _extract_id_from_folder(path.parts[1])
     return [_build_source(path, "local", mid)]
+
 
 
 # ------------------------------------------------------------------

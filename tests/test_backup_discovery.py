@@ -49,6 +49,14 @@ class FakePath:
     def parts(self) -> tuple[str, ...]:
         return tuple(self.path_str.split("/"))
 
+    @property
+    def parent(self) -> "FakePath":
+        parts = self.path_str.split("/")
+        if len(parts) <= 1:
+            return FakePath(".", self.fs_structure)
+        return FakePath("/".join(parts[:-1]), self.fs_structure)
+
+
     def is_dir(self) -> bool:
         p = self.path_str
         if p in self.fs_structure:
@@ -245,3 +253,36 @@ class TestBackupDiscovery(unittest.TestCase):
         setattr(mock_local, "return_value", [BackupSource(Path("loc"), "local", "600259", 200)])
         all_sources = discover_all_sources("192.168.11.245", "backups")
         self.assertEqual(len(all_sources), 2)
+
+    @patch("services.backup_discovery.Path")
+    def test_scan_local_sources_multiple_drives(self, mock_path: object) -> None:
+        """Test scanning local sources on multiple drives."""
+        fs = {
+            "C:/OS_5_PMC_600259/14029": {"is_dir": True, "mtime": 100.0},
+            "D:/OS_6_PMC_600259/14029": {"is_dir": True, "mtime": 200.0},
+        }
+        setattr(mock_path, "side_effect", lambda p: FakePath(p, fs))
+        sources = scan_local_sources("14029", admin_mode=True)
+        self.assertEqual(len(sources), 2)
+        paths = [s.path.as_posix() for s in sources]
+        self.assertIn("C:/OS_5_PMC_600259/14029", paths)
+        self.assertIn("D:/OS_6_PMC_600259/14029", paths)
+
+    def test_build_source_with_raiz(self) -> None:
+        """Test that _build_source includes RAIZ directory size and names."""
+        from services.backup_discovery import _build_source
+        fs = {
+            "C:/OS_5_PMC_600259/USUARIOS/14029": {"is_dir": True},
+            "C:/OS_5_PMC_600259/USUARIOS/14029/Desktop/a.txt": {"size": 15},
+            "C:/OS_5_PMC_600259/RAIZ/db.sqlite": {"size": 25},
+        }
+        fs["C:/OS_5_PMC_600259/RAIZ"] = {"is_dir": True}
+        fs["C:/OS_5_PMC_600259/USUARIOS"] = {"is_dir": True}
+        fs["C:/OS_5_PMC_600259/USUARIOS/14029/Desktop"] = {"is_dir": True}
+
+        user_path = FakePath("C:/OS_5_PMC_600259/USUARIOS/14029", fs)
+        source = _build_source(user_path, "local", "600259")  # type: ignore
+
+        self.assertEqual(source.total_bytes, 40)
+        self.assertIn("RAIZ", source.folder_list)
+

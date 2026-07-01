@@ -189,20 +189,21 @@ class MergeSourcesWorker(ThreadedWorker):
     """Merge multiple backup sources into an optimal file set.
 
     Example:
-        w = MergeSourcesWorker(sources)
+        w = MergeSourcesWorker(sources, admin_mode=False)
         w.finished.connect(on_merged)
         w.start()
     """
     finished = pyqtSignal(object)  # MergedFileSet
 
-    def __init__(self, sources: list[BackupSource]) -> None:
+    def __init__(self, sources: list[BackupSource], admin_mode: bool = False) -> None:
         super().__init__()
         self._sources = sources
+        self._admin_mode = admin_mode
 
     def run(self) -> None:
         try:
             from services.backup_merger import merge_sources
-            result = merge_sources(self._sources)
+            result = merge_sources(self._sources, admin_mode=self._admin_mode)
             self.finished.emit(result)
         except Exception as exc:
             logger.error('{"event":"merge_error","error":"%s"}', exc)
@@ -211,6 +212,7 @@ class MergeSourcesWorker(ThreadedWorker):
             self.finished.emit(
                 MergedFileSet(files=[], total_bytes=0, source_summary="Erro"),
             )
+
 
 
 class CopyFilesWorker(ThreadedWorker):

@@ -38,6 +38,10 @@ DISK_OVERHEAD_FACTOR: float = 1.1
 # Minimum free-space buffer beyond the overhead, in bytes (200 MB)
 DISK_OVERHEAD_BUFFER_BYTES: int = 200 * 1024 * 1024
 
+# Upper limit of concurrent threads allowed for parallel directory walks to avoid network congestion
+MAX_CONCURRENT_DISCOVERY_TASKS: int = 4
+
+
 try:
     import app_secrets
 except ImportError:
