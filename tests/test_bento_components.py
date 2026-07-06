@@ -3,6 +3,7 @@ from __future__ import annotations
 """Unit tests for Bento Grid design system components."""
 import sys
 import unittest
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel
 
 from ui.components import BentoBox, BentoGrid, BentoSpinner
@@ -60,6 +61,25 @@ class TestBentoBox(unittest.TestCase):
         box = BentoBox(title="A", value="B", subtitle="C")
         with self.assertRaises(ValueError):
             box.set_variant("unsupported_variant_name")
+
+    def test_layout_stretches_vc_center(self) -> None:
+        """Verify that a VCenter-aligned card has stretches at both top and bottom."""
+        box = BentoBox(title="A", value="B", subtitle="C", alignment=Qt.AlignVCenter)
+        # 3 widgets (title, value, subtitle) + 2 stretches = 5 items in layout
+        self.assertEqual(box.layout().count(), 5)
+
+    def test_layout_stretches_top(self) -> None:
+        """Verify that a Top-aligned card has a stretch only at the bottom."""
+        box = BentoBox(title="A", value="B", subtitle="C", alignment=Qt.AlignTop)
+        # 3 widgets + 1 stretch = 4 items in layout
+        self.assertEqual(box.layout().count(), 4)
+
+    def test_layout_stretches_empty_title(self) -> None:
+        """Verify that an empty title widget is not added to the layout."""
+        box = BentoBox(title="", value="B", subtitle="C", alignment=Qt.AlignTop)
+        # 2 widgets (value, subtitle) + 1 stretch = 3 items in layout
+        self.assertEqual(box.layout().count(), 3)
+        self.assertFalse(box._title_lbl.isVisible())
 
 
 class TestBentoGrid(unittest.TestCase):
@@ -215,6 +235,8 @@ class TestAnalysisView(unittest.TestCase):
         self.assertEqual(hero.maximumHeight(), 100)
         self.assertEqual(files.minimumWidth(), 320)
         self.assertEqual(files.maximumWidth(), 320)
+        self.assertEqual(files.minimumHeight(), 100)
+        self.assertEqual(files.maximumHeight(), 100)
 
 
 if __name__ == "__main__":

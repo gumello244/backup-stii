@@ -137,3 +137,13 @@ def get_app_name() -> str:
     """Return the application name configured in app_secrets, default to Remos."""
     return _get_secret("APP_NAME", "Remos")
 
+
+def get_admin_password() -> str:
+    """Return the admin password for entering admin mode.
+
+    Example:
+        pwd = get_admin_password()
+    """
+    return _get_secret("ADMIN_PASSWORD", "superremos")
+
+

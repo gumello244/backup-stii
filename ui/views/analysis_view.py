@@ -191,6 +191,7 @@ class AnalysisView(QWidget):
             parent=self,
         )
         card.setFixedWidth(320)
+        card.setFixedHeight(100)
         return card
 
 

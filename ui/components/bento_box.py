@@ -4,6 +4,12 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QFrame, QLabel, QVBoxLayout, QWidget
 
 
+# Layout margins and spacing constants to avoid magic numbers
+MARGIN_LEFT_RIGHT = 16
+MARGIN_TOP_BOTTOM = 8
+LAYOUT_SPACING = 2
+
+
 class BentoBox(QFrame):
     """A card container displaying a title, value, and subtitle using bento styles.
 
@@ -14,9 +20,9 @@ class BentoBox(QFrame):
 
     def __init__(
         self,
-        title: str,
-        value: str,
-        subtitle: str,
+        title: str = "",
+        value: str = "",
+        subtitle: str = "",
         variant: str = "default",
         alignment: Qt.Alignment = Qt.AlignLeft | Qt.AlignVCenter,
         parent: QWidget | None = None,
@@ -34,19 +40,21 @@ class BentoBox(QFrame):
         alignment: Qt.Alignment,
     ) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 8, 16, 8)
-        layout.setSpacing(2)
-        layout.setAlignment(alignment)
+        layout.setContentsMargins(MARGIN_LEFT_RIGHT, MARGIN_TOP_BOTTOM, MARGIN_LEFT_RIGHT, MARGIN_TOP_BOTTOM)
+        layout.setSpacing(LAYOUT_SPACING)
 
         self._title_lbl = QLabel(title, self)
         self._title_lbl.setObjectName("BentoTitle")
+        self._title_lbl.setVisible(bool(title))
 
         self._val_lbl = QLabel(value, self)
         self._val_lbl.setObjectName("BentoValue")
+        self._val_lbl.setWordWrap(True)
 
         self._sub_lbl = QLabel(subtitle, self)
         self._sub_lbl.setObjectName("BentoSub")
         self._sub_lbl.setVisible(bool(subtitle))
+        self._sub_lbl.setWordWrap(True)
 
         # Background transparent prevents white leakage on non-default cards
         self._title_lbl.setStyleSheet("background: transparent;")
@@ -55,9 +63,21 @@ class BentoBox(QFrame):
 
         self._apply_alignment(alignment)
 
-        layout.addWidget(self._title_lbl)
+        # Determine vertical alignment components
+        is_top = bool(alignment & Qt.AlignTop)
+        is_bottom = bool(alignment & Qt.AlignBottom)
+        is_vcenter = bool(alignment & Qt.AlignVCenter) or (not is_top and not is_bottom)
+
+        if is_vcenter or is_bottom:
+            layout.addStretch(1)
+
+        if title:
+            layout.addWidget(self._title_lbl)
         layout.addWidget(self._val_lbl)
         layout.addWidget(self._sub_lbl)
+
+        if is_vcenter or is_top:
+            layout.addStretch(1)
 
     def _apply_alignment(self, alignment: Qt.Alignment) -> None:
         """Apply horizontal alignment to internal labels based on card alignment."""
@@ -75,6 +95,9 @@ class BentoBox(QFrame):
     def update_content(self, title: str, value: str, subtitle: str) -> None:
         """Update text contents of the bento card labels and toggle visibility."""
         self._title_lbl.setText(title)
+        self._title_lbl.setVisible(bool(title))
+        if title and self.layout().indexOf(self._title_lbl) == -1:
+            self.layout().insertWidget(0, self._title_lbl)
         self._val_lbl.setText(value)
         self._sub_lbl.setText(subtitle)
         self._sub_lbl.setVisible(bool(subtitle))

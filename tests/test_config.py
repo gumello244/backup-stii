@@ -90,6 +90,17 @@ class TestConfig(unittest.TestCase):
         with patch("config.app_secrets", MockAppName):
             self.assertEqual(config.get_app_name(), "CustomRemos")
 
+    def test_get_admin_password(self) -> None:
+        """Verify get_admin_password resolution and default."""
+        with patch("config.app_secrets", None):
+            self.assertEqual(config.get_admin_password(), "superremos")
+
+        class MockAdminPass:
+            ADMIN_PASSWORD = "custom_password"
+
+        with patch("config.app_secrets", MockAdminPass):
+            self.assertEqual(config.get_admin_password(), "custom_password")
+
 
 if __name__ == "__main__":
     unittest.main()

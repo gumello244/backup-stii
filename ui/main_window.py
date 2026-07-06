@@ -30,6 +30,7 @@ from ui.views.confirm_view import ConfirmView
 from ui.views.progress_view import ProgressView
 from ui.views.summary_view import SummaryView
 from ui.views.about_view import AboutView
+from ui.views.admin_view import AdminView
 from ui.workers import (
     DiscoverSourcesWorker,
     MergeSourcesWorker,
@@ -48,6 +49,8 @@ _CONFIRM = 2
 _PROGRESS = 3
 _SUMMARY = 4
 _ABOUT = 5
+_ADMIN = 6
+
 
 
 @dataclass
@@ -112,6 +115,7 @@ class MainWindow(QMainWindow):
         self._progress = ProgressView(self)
         self._summary = SummaryView(self)
         self._about = AboutView(self)
+        self._admin = AdminView(self)
 
         self._stack.add_view(self._welcome)
         self._stack.add_view(self._analysis)
@@ -119,6 +123,7 @@ class MainWindow(QMainWindow):
         self._stack.add_view(self._progress)
         self._stack.add_view(self._summary)
         self._stack.add_view(self._about)
+        self._stack.add_view(self._admin)
 
     def _connect_signals(self) -> None:
         """Wire view signals to navigation handlers.
@@ -128,6 +133,7 @@ class MainWindow(QMainWindow):
         """
         self._welcome.start_requested.connect(self._go_to_analysis)
         self._welcome.about_requested.connect(self._go_to_about)
+        self._welcome.admin_mode_unlocked.connect(self._go_to_admin)
         self._analysis.next_requested.connect(self._go_to_confirm)
         self._analysis.back_requested.connect(self._go_to_welcome)
         self._analysis.retry_requested.connect(self._retry_discovery)
@@ -137,6 +143,9 @@ class MainWindow(QMainWindow):
         self._summary.copy_skipped_requested.connect(self._copy_skipped)
         self._summary.finish_requested.connect(self.close)
         self._about.back_requested.connect(self._go_to_welcome)
+        self._admin.back_requested.connect(self._go_to_welcome)
+        self._admin.restore_requested.connect(self._start_admin_restore)
+
 
     # ------------------------------------------------------------------
     # Background discovery (starts on construction)
@@ -185,7 +194,30 @@ class MainWindow(QMainWindow):
         Example:
             self._go_to_welcome()
         """
+        self._state.admin_mode = False
         self._stack.navigate_to(_WELCOME)
+
+    def _go_to_admin(self) -> None:
+        """Navigate to the admin view.
+
+        Example:
+            self._go_to_admin()
+        """
+        self._stack.navigate_to(_ADMIN)
+
+    def _start_admin_restore(self) -> None:
+        """Start the backup restoration flow in admin mode.
+
+        Example:
+            self._start_admin_restore()
+        """
+        self._state.admin_mode = True
+        self._state.sources.clear()
+        self._state.merged = None
+        self._stack.navigate_to(_ANALYSIS)
+        self._analysis.set_discovering()
+        self._start_background_discovery()
+
 
     def _go_to_about(self) -> None:
         """Navigate to the about view.
