@@ -15,9 +15,9 @@ class BentoSpinner(QWidget):
         layout.addWidget(spinner)
     """
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, size: int = 28) -> None:
         super().__init__(parent)
-        self.setFixedSize(28, 28)
+        self.setFixedSize(size, size)
         self._angle: int = 0
         self._timer: QTimer = QTimer(self)
         self._timer.timeout.connect(self._rotate)
@@ -46,7 +46,9 @@ class BentoSpinner(QWidget):
         painter.translate(self.width() / 2, self.height() / 2)
         painter.rotate(self._angle)
         
-        pen = QPen(QColor(RM_ACCENT), 2.5)
+        pen_width = max(1.5, self.width() / 11)
+        pen = QPen(QColor(RM_ACCENT), pen_width)
         pen.setCapStyle(Qt.RoundCap)
         painter.setPen(pen)
-        painter.drawArc(-9, -9, 18, 18, 0, 270 * 16)
+        radius = self.width() / 2 - pen_width
+        painter.drawArc(int(-radius), int(-radius), int(radius * 2), int(radius * 2), 0, 270 * 16)

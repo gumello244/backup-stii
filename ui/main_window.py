@@ -31,6 +31,7 @@ from ui.views.progress_view import ProgressView
 from ui.views.summary_view import SummaryView
 from ui.views.about_view import AboutView
 from ui.views.admin_view import AdminView
+from ui.views.admin_restore_view import AdminRestoreView
 from ui.workers import (
     DiscoverSourcesWorker,
     MergeSourcesWorker,
@@ -50,6 +51,7 @@ _PROGRESS = 3
 _SUMMARY = 4
 _ABOUT = 5
 _ADMIN = 6
+_ADMIN_RESTORE = 7
 
 
 
@@ -116,6 +118,7 @@ class MainWindow(QMainWindow):
         self._summary = SummaryView(self)
         self._about = AboutView(self)
         self._admin = AdminView(self)
+        self._admin_restore = AdminRestoreView(self)
 
         self._stack.add_view(self._welcome)
         self._stack.add_view(self._analysis)
@@ -124,6 +127,7 @@ class MainWindow(QMainWindow):
         self._stack.add_view(self._summary)
         self._stack.add_view(self._about)
         self._stack.add_view(self._admin)
+        self._stack.add_view(self._admin_restore)
 
     def _connect_signals(self) -> None:
         """Wire view signals to navigation handlers.
@@ -145,6 +149,8 @@ class MainWindow(QMainWindow):
         self._about.back_requested.connect(self._go_to_welcome)
         self._admin.back_requested.connect(self._go_to_welcome)
         self._admin.restore_requested.connect(self._start_admin_restore)
+        self._admin_restore.back_requested.connect(self._go_to_admin_dashboard)
+        self._admin_restore.next_requested.connect(self._on_admin_restore_prepared)
 
 
     # ------------------------------------------------------------------
@@ -214,9 +220,21 @@ class MainWindow(QMainWindow):
         self._state.admin_mode = True
         self._state.sources.clear()
         self._state.merged = None
-        self._stack.navigate_to(_ANALYSIS)
-        self._analysis.set_discovering()
-        self._start_background_discovery()
+        self._stack.navigate_to(_ADMIN_RESTORE)
+        self._admin_restore.start_discovery()
+
+    def _go_to_admin_dashboard(self) -> None:
+        """Navigate back to the admin tool dashboard."""
+        self._state.admin_mode = False
+        self._stack.navigate_to(_ADMIN)
+
+    def _on_admin_restore_prepared(self) -> None:
+        """Handle transition after admin restore files are compiled."""
+        merged = self._state.merged
+        if merged:
+            self._confirm.populate(merged)
+            self._start_background_benchmarks(merged)
+            self._stack.navigate_to(_CONFIRM)
 
 
     def _go_to_about(self) -> None:
@@ -245,9 +263,12 @@ class MainWindow(QMainWindow):
         Example:
             self._go_to_analysis_from_confirm()
         """
-        self._stack.navigate_to(_ANALYSIS)
-        if self._state.merged:
-            self._analysis.set_resolved(self._state.merged, self._state.admin_mode)
+        if self._state.admin_mode:
+            self._stack.navigate_to(_ADMIN_RESTORE)
+        else:
+            self._stack.navigate_to(_ANALYSIS)
+            if self._state.merged:
+                self._analysis.set_resolved(self._state.merged, self._state.admin_mode)
 
     def _go_to_confirm(self) -> None:
         """Navigate to the confirmation view.

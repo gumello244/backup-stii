@@ -18,7 +18,7 @@ from pathlib import Path
 from threading import Event
 from typing import Optional
 
-from PyQt5.QtCore import QThread, pyqtSignal, QObject
+from PyQt5.QtCore import QThread, pyqtSignal
 
 from config import (
     get_api_config, get_server_config, get_copy_retry_config,
@@ -185,6 +185,48 @@ class DiscoverSourcesWorker(ThreadedWorker):
             self.finished.emit([])
 
 
+class AdminDiscoverSourcesWorker(ThreadedWorker):
+    """Scan network + local for admin backup sources, emitting incrementally.
+
+    Example:
+        w = AdminDiscoverSourcesWorker(custom_query="14029")
+        w.source_found.connect(on_source_found)
+        w.start()
+    """
+    source_found = pyqtSignal(object)  # AdminBackupSource
+    stage_changed = pyqtSignal(str)
+    finished = pyqtSignal()
+
+    def __init__(self, custom_query: Optional[str] = None) -> None:
+        super().__init__()
+        self._custom_query = custom_query
+        self._cancel = Event()
+
+    def request_cancel(self) -> None:
+        """Ask a still-running scan to stop at its next checkpoint.
+
+        Example:
+            worker.request_cancel()
+        """
+        self._cancel.set()
+
+    def run(self) -> None:
+        try:
+            from services.admin_backup_discovery import scan_admin_backups
+            cfg = get_server_config()
+            for src in scan_admin_backups(
+                cfg.server_ip, cfg.backup_share, self._custom_query,
+                stage_cb=self.stage_changed.emit,
+                cancel_event=self._cancel,
+            ):
+                self.source_found.emit(src)
+        except Exception as exc:
+            logger.error('{"event":"admin_discover_error","error":"%s"}', exc)
+            self.error.emit(str(exc))
+        finally:
+            self.finished.emit()
+
+
 class MergeSourcesWorker(ThreadedWorker):
     """Merge multiple backup sources into an optimal file set.
 
@@ -212,7 +254,6 @@ class MergeSourcesWorker(ThreadedWorker):
             self.finished.emit(
                 MergedFileSet(files=[], total_bytes=0, source_summary="Erro"),
             )
-
 
 
 class CopyFilesWorker(ThreadedWorker):
@@ -309,3 +350,54 @@ class BenchmarkWorker(ThreadedWorker):
         if self._network_path:
             net_speed = run_write_benchmark(self._network_path)
         self.finished.emit(float(local_speed), float(net_speed))
+
+
+class AdminPrepareRestoreWorker(ThreadedWorker):
+    """Recursively walks selected directories to compile restoration file list."""
+    finished = pyqtSignal(list)  # list[MergedFile]
+
+    def __init__(self, source: object, scope: str, profile_name: Optional[str] = None) -> None:
+        super().__init__()
+        self._source = source
+        self._scope = scope
+        self._profile_name = profile_name
+
+    def run(self) -> None:
+        try:
+            from services.admin_backup_discovery import compile_admin_restore_files
+            files = compile_admin_restore_files(self._source, self._scope, self._profile_name)
+            self.finished.emit(files)
+        except Exception as exc:
+            logger.error('{"event":"prepare_restore_error","error":"%s"}', exc)
+            self.error.emit(str(exc))
+            self.finished.emit([])
+
+
+class AdminSourceDetailWorker(ThreadedWorker):
+    """Compute exact RAIZ/profile sizes for a single selected admin source.
+
+    Discovery only proves a source has restorable content (cheap probes);
+    the full file-tree walk needed for exact sizes is deferred here so
+    picking one machine from a broad search doesn't pay for statting every
+    match's entire history up front.
+
+    Example:
+        w = AdminSourceDetailWorker(source)
+        w.finished.connect(on_details_loaded)
+        w.start()
+    """
+    finished = pyqtSignal(object)  # AdminBackupSource, with sizes filled in
+
+    def __init__(self, source: object) -> None:
+        super().__init__()
+        self._source = source
+
+    def run(self) -> None:
+        try:
+            from services.admin_backup_discovery import load_source_details
+            detailed = load_source_details(self._source)
+            self.finished.emit(detailed)
+        except Exception as exc:
+            logger.error('{"event":"source_detail_error","error":"%s"}', exc)
+            self.error.emit(str(exc))
+            self.finished.emit(self._source)

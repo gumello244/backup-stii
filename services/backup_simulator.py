@@ -57,7 +57,7 @@ def _simulate_single_file_step(
     cancel_event: Event,
 ) -> tuple[int, int, bool, bool]:
     """Simulate single file, returning (new_copied_bytes, actual_copied_bytes, is_copied, is_aborted)."""
-    dest = resolve_dest_path(mf.dest_folder, mf.relative_name)
+    dest = resolve_dest_path(mf.dest_folder, mf.relative_name, getattr(mf, "target_profile", None))
 
     from services.backup_copier import _is_identical
     if dest.exists() and _is_identical(mf.source_path, dest):

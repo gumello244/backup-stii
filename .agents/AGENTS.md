@@ -30,12 +30,15 @@
 
 ## Tests
 
-- Tests run with a single command: `<project-specific>`.
 - Every new function gets a test. Bug fixes get a regression test.
 - Mock external I/O (API, DB, filesystem) with named fake classes,
   not inline stubs.
 - Tests must be F.I.R.S.T: fast, independent, repeatable,
   self-validating, timely.
+- Run all tests: `python -m unittest discover -s tests`
+- Run a single test file: `python -m unittest tests.test_backup_merger`
+- Run a single test case/method: `python -m unittest tests.test_backup_merger.TestBackupMerger.test_method_name`
+- The venv (`venv/`, Python 3.8.10) does not have pytest installed — tests are plain `unittest.TestCase` and must be run with `unittest`, not `pytest`.
 
 ## Dependencies
 

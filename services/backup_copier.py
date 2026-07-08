@@ -133,8 +133,16 @@ class FileProgressTracker:
         self.file_written = 0
 
 
-def resolve_dest_path(folder: str, relative_name: str) -> Path:
+def resolve_dest_path(
+    folder: str,
+    relative_name: str,
+    target_profile: Optional[str] = None,
+) -> Path:
     """Map a backup folder + relative name to a local profile path."""
+    if folder == "RAIZ":
+        return Path("C:\\") / relative_name.replace("/", os.sep)
+    if target_profile:
+        return Path("C:\\Users") / target_profile / folder / relative_name.replace("/", os.sep)
     base = PROFILE_FOLDER_MAP.get(folder) or (_FALLBACK_ROOT / folder)
     return base / relative_name.replace("/", os.sep)
 
@@ -297,7 +305,7 @@ def _copy_file_step(
     cancel_event: Event,
 ) -> tuple[int, bool, bool]:
     """Copy one file, returning (new_bytes, actual_written, reset_fails, inc_fails)."""
-    dest = resolve_dest_path(mf.dest_folder, mf.relative_name)
+    dest = resolve_dest_path(mf.dest_folder, mf.relative_name, getattr(mf, "target_profile", None))
     res = _check_skip_or_conflict(mf, dest, total_bytes, copied_bytes, progress_cb, skipped)
     if res is not None:
         return res, 0, False, False

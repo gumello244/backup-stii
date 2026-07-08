@@ -36,6 +36,7 @@ class MergedFile:
     relative_name: str
     size_bytes: int
     modified_time: float
+    target_profile: Optional[str] = None
 
 
 @dataclass

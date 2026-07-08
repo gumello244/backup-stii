@@ -14,7 +14,7 @@ class TestConfig(unittest.TestCase):
         """Verify get_server_config defaults when secrets are not present."""
         with patch("config.app_secrets", None):
             cfg = config.get_server_config()
-            self.assertEqual(cfg.server_ip, "192.168.11.245")
+            self.assertEqual(cfg.server_ip, "localhost")
             self.assertEqual(cfg.backup_share, "backups")
 
     def test_get_server_config_custom(self) -> None:
