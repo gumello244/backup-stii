@@ -41,6 +41,38 @@ DISK_OVERHEAD_BUFFER_BYTES: int = 200 * 1024 * 1024
 # Upper limit of concurrent threads allowed for parallel directory walks to avoid network congestion
 MAX_CONCURRENT_DISCOVERY_TASKS: int = 4
 
+# ------------------------------------------------------------------
+# Copy-engine constants (services/backup_copier.py)
+# ------------------------------------------------------------------
+
+# Read/write buffer for _copy_single_file (1 MB) — fewer syscalls per file
+# than a small buffer, which matters most over network shares.
+COPY_CHUNK_BYTES: int = 1024 * 1024
+
+# How many files the copy loop copies concurrently. Files are independent of
+# each other, so a small pool hides per-file overhead (syscalls, and for
+# admin-mode restores the elevated-helper IPC round trip) that dominates
+# over thousands of small files far more than raw disk throughput does.
+COPY_WORKERS: int = 4
+
+# ------------------------------------------------------------------
+# Admin-helper IPC constants (services/elevation.py)
+# ------------------------------------------------------------------
+
+# How long to wait for the elevated helper's named pipe to come up after
+# the UAC prompt is accepted, before giving up.
+ADMIN_HELPER_CONNECT_TIMEOUT_SECONDS: float = 15.0
+# Polling interval while waiting for that pipe to come up.
+ADMIN_HELPER_CONNECT_POLL_SECONDS: float = 0.3
+# Pipe I/O buffer size — comfortably larger than any single JSON request or
+# response the helper protocol sends.
+ADMIN_HELPER_PIPE_BUFFER_BYTES: int = 65536
+# A pipe connection attempt can transiently see ERROR_PIPE_BUSY/FILE_NOT_FOUND
+# while the server is between requests — retried this many times...
+ADMIN_HELPER_CONNECT_RETRY_ATTEMPTS: int = 20
+# ...waiting this long between attempts (20 * 0.2s = 4s of tolerance).
+ADMIN_HELPER_CONNECT_RETRY_DELAY_SECONDS: float = 0.2
+
 
 try:
     import app_secrets
@@ -120,6 +152,16 @@ def get_copy_retry_config() -> CopyRetryConfig:
     )
 
 
+def get_discovery_cache_ttl_seconds() -> float:
+    """How long scan_admin_backups() reuses a cached candidate listing
+    before re-scanning the network share.
+
+    Example:
+        if (now - cached_at) < get_discovery_cache_ttl_seconds(): ...
+    """
+    return float(_get_secret("DISCOVERY_CACHE_TTL_SECONDS", "30.0"))
+
+
 def is_test_mode() -> bool:
     """Return True if TEST_MODE is enabled in app_secrets.
 
@@ -136,14 +178,5 @@ def is_test_mode() -> bool:
 def get_app_name() -> str:
     """Return the application name configured in app_secrets, default to Remos."""
     return _get_secret("APP_NAME", "Remos")
-
-
-def get_admin_password() -> str:
-    """Return the admin password for entering admin mode.
-
-    Example:
-        pwd = get_admin_password()
-    """
-    return _get_secret("ADMIN_PASSWORD", "superremos")
 
 

@@ -18,11 +18,17 @@ from typing import Optional
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QCheckBox, QScrollArea, QFrame,
+    QPushButton, QCheckBox, QScrollArea, QFrame, QSizePolicy,
 )
 
 from config import DISK_OVERHEAD_FACTOR, DISK_OVERHEAD_BUFFER_BYTES, LOCAL_SPEED_FALLBACK_BPS
-from services.backup_merger import MergedFileSet, FolderSummary, MergedFile
+from services.backup_merger import (
+    MergedFileSet, FolderSummary, MergedFile, is_raiz_file, filter_files_by_selection,
+)
+from ui.assets import (
+    RM_TEXT_MUTED, RM_HERO_BG, RM_HERO_BORDER,
+    RM_SURFACE, RM_BORDER, RM_GREEN, RM_RED,
+)
 from ui.components import BentoBox
 from ui.format_utils import format_bytes as _format_bytes, format_time as _format_time
 
@@ -36,6 +42,7 @@ _FOLDER_NAME_MAP_PT: dict[str, str] = {
     "Music": "Músicas",
     "Videos": "Vídeos",
     "Favorites": "Favoritos",
+    "RAIZ": "RAIZ",
 }
 
 
@@ -54,26 +61,28 @@ class FolderOptionWidget(QFrame):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setObjectName("FolderOptionRow")
         self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(36)
         self._setup_layout(pt_name, file_count, total_bytes)
+        self.update_style()
 
     def _setup_layout(self, pt_name: str, file_count: int, total_bytes: int) -> None:
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 2, 8, 2)
-        layout.setSpacing(4)
+        layout.setContentsMargins(10, 0, 10, 0)
+        layout.setSpacing(8)
 
         self.checkbox = QCheckBox(self)
         self.checkbox.setObjectName("FolderOptionCheckbox")
         self.checkbox.setChecked(True)
         self.checkbox.setCursor(Qt.PointingHandCursor)
         self.checkbox.setFixedWidth(12)
+        self.checkbox.stateChanged.connect(self.update_style)
 
         self.title_lbl = QLabel(pt_name, self)
         self.title_lbl.setObjectName("FolderTitleLabel")
 
         suffix = "arquivo" if file_count == 1 else "arquivos"
-        self.count_lbl = QLabel(f"({file_count} {suffix})", self)
+        self.count_lbl = QLabel(f"{file_count} {suffix}", self)
         self.count_lbl.setObjectName("FolderCountLabel")
 
         self.size_lbl = QLabel(_format_bytes(total_bytes), self)
@@ -84,6 +93,25 @@ class FolderOptionWidget(QFrame):
         layout.addWidget(self.count_lbl)
         layout.addStretch()
         layout.addWidget(self.size_lbl)
+
+    def update_style(self) -> None:
+        if self.checkbox.isChecked():
+            self.setStyleSheet(f"""
+                FolderOptionWidget {{
+                    background-color: {RM_HERO_BG};
+                    border: 2px solid {RM_HERO_BORDER};
+                    border-radius: 6px;
+                }}
+            """)
+        else:
+            self.setStyleSheet(f"""
+                FolderOptionWidget {{
+                    background-color: {RM_SURFACE};
+                    border: 1px solid {RM_BORDER};
+                    border-radius: 6px;
+                }}
+                FolderOptionWidget:hover {{ border-color: #bbbbbb; }}
+            """)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         """Toggle checkbox state on click anywhere on the widget."""
@@ -108,7 +136,9 @@ class ConfirmView(QWidget):
         self._checkboxes: dict[str, QCheckBox] = {}
         self._write_speed_bps: Optional[int] = None
         self._network_speed_bps: Optional[int] = None
+        self._admin_mode_flag: bool = False
         self._init_ui()
+        self._options_card.hide()
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -130,17 +160,10 @@ class ConfirmView(QWidget):
 
         # Bento cards (Left Column stack)
         self._hero_card = BentoBox(
-            title="ESPAÇO DISCO",
+            title="ESPAÇO EM DISCO",
             value="Verificando...",
             subtitle="",
-            variant="default",
-            parent=self,
-        )
-        self._needed_card = BentoBox(
-            title="ESPAÇO NECESSÁRIO",
-            value="--",
-            subtitle="Arquivos selecionados",
-            variant="default",
+            variant="hero",
             parent=self,
         )
         self._time_card = BentoBox(
@@ -151,33 +174,76 @@ class ConfirmView(QWidget):
             parent=self,
         )
 
+        # Options Bento Box card (below Time Card)
+        self._options_card = QFrame(self)
+        self._options_card.setObjectName("SurfaceCard")
+        self._options_card.setStyleSheet(
+            f"QFrame#SurfaceCard {{ border: 1px solid {RM_BORDER}; border-radius: 10px;"
+            f" background: #FFFFFF; }}"
+        )
+        options_layout = QVBoxLayout(self._options_card)
+        options_layout.setContentsMargins(16, 10, 16, 10)
+        options_layout.setSpacing(10)
+
+        options_title = QLabel("OPÇÕES DE RESTAURAÇÃO", self._options_card)
+        options_title.setObjectName("BentoTitle")
+        options_title.setStyleSheet(f"font-size: 10px; font-weight: 800; color: {RM_TEXT_MUTED}; letter-spacing: 1px;")
+
+        self.cut_checkbox = QCheckBox("Recortar arquivos", self._options_card)
+        self.cut_checkbox.setCursor(Qt.PointingHandCursor)
+        self.cut_checkbox.setStyleSheet("""
+            QCheckBox {
+                font-size: 12px;
+                font-weight: 400;
+                color: #4A5568;
+                background: transparent;
+            }
+            QCheckBox::indicator {
+                width: 12px;
+                height: 12px;
+            }
+        """)
+
+        options_layout.addWidget(options_title)
+        options_layout.addWidget(self.cut_checkbox)
+
         left_column = QVBoxLayout()
         left_column.setSpacing(8)
         left_column.addWidget(self._hero_card)
-        left_column.addWidget(self._needed_card)
         left_column.addWidget(self._time_card)
+        left_column.addWidget(self._options_card)
+        left_column.addStretch()
 
         # Folder selection bento card (Right Column)
         self._folder_card = QFrame(self)
-        self._folder_card.setObjectName("BentoCard")
+        self._folder_card.setObjectName("SurfaceCard")
+        self._folder_card.setStyleSheet(
+            f"QFrame#SurfaceCard {{ border: 1px solid {RM_BORDER}; border-radius: 10px;"
+            f" background: #FFFFFF; }}"
+        )
+        self._folder_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         folder_card_layout = QVBoxLayout(self._folder_card)
-        folder_card_layout.setContentsMargins(16, 12, 16, 12)
+        folder_card_layout.setContentsMargins(0, 12, 0, 12)
         folder_card_layout.setSpacing(6)
 
+        title_layout = QHBoxLayout()
+        title_layout.setContentsMargins(16, 0, 16, 0)
         folder_title = QLabel("SELECIONAR PASTAS", self._folder_card)
         folder_title.setObjectName("BentoTitle")
-        folder_card_layout.addWidget(folder_title)
+        title_layout.addWidget(folder_title)
+        folder_card_layout.addLayout(title_layout)
 
         # Scrollable folder list
         scroll = QScrollArea(self)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setWidgetResizable(True)
+        scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._folder_container = QWidget(scroll)
         self._folder_container.setStyleSheet("background: transparent;")
         self._folder_layout = QVBoxLayout(self._folder_container)
         self._folder_layout.setAlignment(Qt.AlignTop)
         self._folder_layout.setSpacing(4)
-        self._folder_layout.setContentsMargins(0, 0, 0, 0)
+        self._folder_layout.setContentsMargins(16, 0, 16, 0)
         scroll.setWidget(self._folder_container)
         folder_card_layout.addWidget(scroll, stretch=1)
 
@@ -185,8 +251,7 @@ class ConfirmView(QWidget):
         right_column = QVBoxLayout()
         right_column.setContentsMargins(0, 0, 0, 0)
         right_column.setSpacing(0)
-        right_column.addWidget(self._folder_card)
-        right_column.addStretch(1)
+        right_column.addWidget(self._folder_card, stretch=1)
 
         main_columns = QHBoxLayout()
         main_columns.setSpacing(12)
@@ -222,13 +287,19 @@ class ConfirmView(QWidget):
     # Public API
     # ------------------------------------------------------------------
 
-    def populate(self, merged: MergedFileSet) -> None:
+    def populate(self, merged: MergedFileSet, admin_mode: bool = False, is_local: bool = True) -> None:
         """Fill in the view with data from a resolved MergedFileSet.
 
         Example:
             view.populate(merged_file_set)
         """
         self._merged = merged
+        self._admin_mode_flag = admin_mode
+        if admin_mode and is_local:
+            self._options_card.show()
+        else:
+            self._options_card.hide()
+            self.cut_checkbox.setChecked(False)
         self._build_folder_list()
         self._recalculate()
 
@@ -247,15 +318,128 @@ class ConfirmView(QWidget):
         """Create one checkbox per destination folder."""
         self._clear_folder_layout()
         self._checkboxes.clear()
-        for name, summary in sorted(self._merged.by_folder.items()):
-            self._add_folder_checkbox(name, summary)
+        if self._is_admin_mode():
+            group_count = self._build_admin_grouped_folder_list()
+        else:
+            group_count = 0
+            for key, title, summary in self._folder_groups_by_folder():
+                self._add_folder_checkbox(key, title, summary)
         min_height = 146
-        calculated_height = 54 + len(self._checkboxes) * 32
+        calculated_height = 54 + len(self._checkboxes) * 36 + group_count * 24
         target_height = max(calculated_height, min_height)
         self._folder_card.setMinimumHeight(min_height)
-        self._folder_card.setMaximumHeight(min(target_height, 280))
+        self._folder_card.setMaximumHeight(16777215)
 
+    def _is_admin_mode(self) -> bool:
+        return self._admin_mode_flag
 
+    def _folder_groups_by_folder(self) -> list[tuple[str, str, FolderSummary]]:
+        """Group files by folder name for normal-mode restores."""
+        if not self._merged:
+            return []
+
+        groups: dict[str, FolderSummary] = {}
+        titles: dict[str, str] = {}
+        for mf in self._merged.files:
+            key = self._selection_key_for_file(mf)
+            summary = groups.get(key)
+            if summary is None:
+                summary = FolderSummary(file_count=0, total_bytes=0)
+                groups[key] = summary
+                titles[key] = self._selection_title_for_file(mf)
+            summary.file_count += 1
+            summary.total_bytes += mf.size_bytes
+
+        return [
+            (key, titles[key], groups[key])
+            for key in sorted(groups)
+        ]
+
+    def _selection_key_for_file(self, mf: MergedFile) -> str:
+        if mf.target_profile:
+            return f"{mf.target_profile}::{mf.dest_folder}"
+        return mf.dest_folder
+
+    def _selection_title_for_file(self, mf: MergedFile) -> str:
+        return _FOLDER_NAME_MAP_PT.get(mf.dest_folder, mf.dest_folder)
+
+    def _build_admin_grouped_folder_list(self) -> int:
+        """Build restore rows grouped by source profile/root for admin mode."""
+        grouped_rows = self._folder_groups_by_source()
+        for source_key, source_title, rows in grouped_rows:
+            group_card = QFrame(self._folder_container)
+            group_card.setStyleSheet("QFrame { border: none; background: transparent; }")
+            group_layout = QVBoxLayout(group_card)
+            group_layout.setContentsMargins(0, 4, 0, 4)
+            group_layout.setSpacing(4)
+
+            source_lbl = QLabel(source_title, group_card)
+            source_lbl.setObjectName("FolderGroupLabel")
+            source_lbl.setStyleSheet(
+                f"font-size: 10px; font-weight: 800; color: {RM_TEXT_MUTED};"
+                " letter-spacing: 1px; background: transparent; border: none;"
+            )
+            group_layout.addWidget(source_lbl)
+
+            for row_key, row_title, summary in rows:
+                row = self._create_folder_row(row_key, row_title, summary)
+                group_layout.addWidget(row)
+
+            self._folder_layout.addWidget(group_card)
+        return len(grouped_rows)
+
+    def _folder_groups_by_source(self) -> list[tuple[str, str, list[tuple[str, str, FolderSummary]]]]:
+        """Group files by source root so admin restores stay separated."""
+        if not self._merged:
+            return []
+
+        grouped: dict[str, dict[str, FolderSummary]] = {}
+        titles: dict[str, str] = {}
+        from services.backup_discovery import detect_user_login
+        current_user = detect_user_login()
+
+        for mf in self._merged.files:
+            if mf.target_profile:
+                source_key = mf.target_profile
+                display_title = mf.target_profile
+                row_key = f"{mf.target_profile}::{mf.dest_folder}"
+                row_title = _FOLDER_NAME_MAP_PT.get(mf.dest_folder, mf.dest_folder)
+            elif is_raiz_file(mf):
+                source_key = "raiz"
+                display_title = "RAIZ"
+                # Determine subfolder inside RAIZ
+                parts = mf.relative_name.split("/")
+                sub_folder = parts[0] if len(parts) > 1 else "RAIZ"
+                row_key = f"raiz::{sub_folder}"
+                row_title = _FOLDER_NAME_MAP_PT.get(sub_folder, sub_folder)
+            else:
+                source_key = current_user
+                display_title = current_user
+                row_key = mf.dest_folder
+                row_title = _FOLDER_NAME_MAP_PT.get(mf.dest_folder, mf.dest_folder)
+
+            titles.setdefault(source_key, display_title)
+
+            source_rows = grouped.setdefault(source_key, {})
+            summary = source_rows.get(row_key)
+            if summary is None:
+                summary = FolderSummary(file_count=0, total_bytes=0)
+                source_rows[row_key] = summary
+            summary.file_count += 1
+            summary.total_bytes += mf.size_bytes
+
+        ordered: list[tuple[str, str, list[tuple[str, str, FolderSummary]]]] = []
+        for source_key in sorted(grouped, key=lambda k: (k != "raiz", k)):
+            rows: list[tuple[str, str, FolderSummary]] = []
+            for row_key, summary in sorted(grouped[source_key].items()):
+                if "::" in row_key:
+                    profile, folder = row_key.split("::", 1)
+                    row_title = _FOLDER_NAME_MAP_PT.get(folder, folder)
+                else:
+                    row_title = _FOLDER_NAME_MAP_PT.get(row_key, row_key)
+                rows.append((row_key, row_title, summary))
+            ordered.append((source_key, titles[source_key], rows))
+        return ordered
 
     def _clear_folder_layout(self) -> None:
         """Clear all child widgets inside the folder layout."""
@@ -265,13 +449,16 @@ class ConfirmView(QWidget):
             if widget is not None:
                 widget.deleteLater()
 
-    def _add_folder_checkbox(self, name: str, summary: FolderSummary) -> None:
-        """Create and add a checkbox for a single backup folder."""
-        pt_name = _FOLDER_NAME_MAP_PT.get(name, name)
-        row = FolderOptionWidget(pt_name, summary.file_count, summary.total_bytes)
+    def _create_folder_row(self, key: str, title: str, summary: FolderSummary) -> FolderOptionWidget:
+        row = FolderOptionWidget(title, summary.file_count, summary.total_bytes)
         row.checkbox.stateChanged.connect(self._recalculate)
+        self._checkboxes[key] = row.checkbox
+        return row
+
+    def _add_folder_checkbox(self, key: str, title: str, summary: FolderSummary) -> None:
+        """Create and add a checkbox for a single backup folder."""
+        row = self._create_folder_row(key, title, summary)
         self._folder_layout.addWidget(row)
-        self._checkboxes[name] = row.checkbox
 
     def _selected_folders(self) -> list[str]:
         """Return the names of all currently checked folders."""
@@ -283,8 +470,7 @@ class ConfirmView(QWidget):
         """Return a list of MergedFile objects that belong to selected folders."""
         if not self._merged:
             return []
-        selected_dirs = set(self._selected_folders())
-        return [f for f in self._merged.files if f.dest_folder in selected_dirs]
+        return filter_files_by_selection(self._merged.files, self._selected_folders())
 
     def _recalculate(self) -> None:
         """Update requirements status based on selection and disk safety margin."""
@@ -292,7 +478,7 @@ class ConfirmView(QWidget):
         needed = sum(f.size_bytes for f in selected)
         available = self._get_available_space()
 
-        from services.backup_copier import estimate_copy_seconds_for_files
+        from services.copy_benchmark import estimate_copy_seconds_for_files
         write_sp = self._write_speed_bps or LOCAL_SPEED_FALLBACK_BPS
         time_est = estimate_copy_seconds_for_files(
             selected, write_sp, self._network_speed_bps
@@ -309,11 +495,6 @@ class ConfirmView(QWidget):
         self, needed: int, available: int, time_est: int, enough: bool
     ) -> None:
         """Update requirements and status bento cards."""
-        self._needed_card.update_content(
-            title="ESPAÇO NECESSÁRIO",
-            value=_format_bytes(needed),
-            subtitle="Arquivos selecionados",
-        )
         self._time_card.update_content(
             title="ESTIMATIVA DE TEMPO",
             value=_format_time(time_est),
@@ -321,21 +502,31 @@ class ConfirmView(QWidget):
         )
 
         drive_letter = Path.home().drive
-        if enough:
+        variant = "success" if enough else "danger"
+        self._hero_card.set_variant(variant)
+
+        if not self._is_admin_mode():
             self._hero_card.update_content(
-                title="ESPAÇO DISCO",
-                value="Suficiente",
+                title="ESPAÇO EM DISCO",
+                value="Suficiente" if enough else "Insuficiente",
+                subtitle=f"{_format_bytes(needed)} necessários",
+            )
+            val_color = RM_GREEN if enough else RM_RED
+            self._hero_card._val_lbl.setStyleSheet(
+                f"font-size: 32px; font-weight: 800; letter-spacing: -1px; color: {val_color}; background: transparent;"
+            )
+            self._hero_card._sub_lbl.setStyleSheet(f"color: {RM_TEXT_MUTED}; background: transparent;")
+        else:
+            self._hero_card.update_content(
+                title="ESPAÇO NECESSÁRIO",
+                value=_format_bytes(needed),
                 subtitle=f"{_format_bytes(available)} livre em {drive_letter}\\",
             )
-            self._hero_card.set_variant("success")
-            return
-
-        self._hero_card.update_content(
-            title="ESPAÇO DISCO",
-            value="Insuficiente",
-            subtitle=f"Falta espaço em {drive_letter}\\",
-        )
-        self._hero_card.set_variant("danger")
+            val_color = RM_GREEN if enough else RM_RED
+            self._hero_card._val_lbl.setStyleSheet(
+                f"font-size: 32px; font-weight: 800; letter-spacing: -1px; color: {val_color}; background: transparent;"
+            )
+            self._hero_card._sub_lbl.setStyleSheet(f"color: {RM_TEXT_MUTED}; background: transparent;")
 
     def _get_available_space(self) -> int:
         """Free disk space on the user's home drive."""

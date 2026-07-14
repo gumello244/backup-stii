@@ -219,6 +219,7 @@ def merge_sources(sources: list[BackupSource], admin_mode: bool = False) -> Merg
 
     merged_index = _merge_indexes(*indexes)
     files = _build_merged_files(merged_index)
+    files = filter_contacts_folder(files)
     return _build_file_set_result(files, sources)
 
 
@@ -287,4 +288,65 @@ def _build_file_set_result(files: list[MergedFile], sources: list[BackupSource])
         by_folder=by_folder,
         source_summary=summary,
     )
+
+
+def is_raiz_file(mf: MergedFile) -> bool:
+    """True if *mf* came from a RAIZ backup folder rather than a user profile.
+
+    Example:
+        if is_raiz_file(merged_file):
+            ...
+    """
+    return any(p.name == "RAIZ" for p in mf.source_path.parents)
+
+
+def filter_files_by_selection(
+    files: list[MergedFile], selected_keys: list[str],
+) -> list[MergedFile]:
+    """Return only the files matching *selected_keys*.
+
+    Each key is either a plain dest_folder ("Desktop"), a profile-scoped
+    folder ("joao::Desktop"), or a RAIZ subfolder ("raiz::Documentos") —
+    the format ConfirmView's folder checkboxes are keyed by.
+
+    Example:
+        kept = filter_files_by_selection(merged.files, ["Desktop", "joao::Documents"])
+    """
+    selected_targets = set()
+    for key in selected_keys:
+        if "::" in key:
+            profile, folder = key.split("::", 1)
+            selected_targets.add((folder, profile))
+        else:
+            selected_targets.add((key, None))
+
+    result = []
+    for f in files:
+        if is_raiz_file(f):
+            parts = f.relative_name.split("/")
+            sub_folder = parts[0] if len(parts) > 1 else "RAIZ"
+            if (sub_folder, "raiz") in selected_targets:
+                result.append(f)
+        elif (f.dest_folder, f.target_profile) in selected_targets:
+            result.append(f)
+    return result
+
+
+def filter_contacts_folder(files: list[MergedFile]) -> list[MergedFile]:
+    """Ignore the folder Contacts if it has only one file.
+
+    Example:
+        filtered = filter_contacts_folder(files)
+    """
+    contacts_counts: dict[Optional[str], int] = {}
+    for f in files:
+        if f.dest_folder.lower() == "contacts":
+            contacts_counts[f.target_profile] = contacts_counts.get(f.target_profile, 0) + 1
+
+    filtered_files = []
+    for f in files:
+        if f.dest_folder.lower() == "contacts" and contacts_counts.get(f.target_profile, 0) == 1:
+            continue
+        filtered_files.append(f)
+    return filtered_files
 

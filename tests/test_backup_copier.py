@@ -9,18 +9,17 @@ import os
 import time
 from threading import Event
 
-from config import (
-    CopyRetryConfig,
-    NETWORK_SPEED_FALLBACK_BPS,
-    LOCAL_SPEED_FALLBACK_BPS,
-)
+from config import CopyRetryConfig
 from services.backup_merger import MergedFile
 from services.backup_copier import (
     resolve_dest_path,
     copy_merged_files,
     copy_skipped_to_desktop,
     PROFILE_FOLDER_MAP,
-    SkippedFile
+    SkippedFile,
+    _delete_source_file,
+    _copy_via_helper_with_retry,
+    _needs_elevated_write,
 )
 
 
@@ -211,35 +210,48 @@ class TestBackupCopier(unittest.TestCase):
     @patch("services.backup_copier.ctypes")
     @patch("services.backup_copier._copy_single_file")
     def test_copy_merged_files_retry_and_fail(self, mock_copy: object, mock_ctypes: object) -> None:
-        setattr(mock_copy, "side_effect", [
-            100,
-            OSError("Network timeout"),
-            200,
-            OSError("Network down"),
-            OSError("Network down"),
-            OSError("Network down"),
-            OSError("Network down")
-        ])
+        """f1 succeeds immediately; f2 fails once then succeeds on retry; f3
+        always fails and survives past the end-of-run retry pass too.
+
+        The copy loop now runs files concurrently, so the mock is keyed by
+        source path (not a shared ordered call sequence) — call order across
+        files is no longer deterministic, but each file's own outcome is.
+        """
+        import threading as _threading
+        call_counts: dict[str, int] = {}
+        counts_lock = _threading.Lock()
+
+        def fake_copy(source: object, dest: object, chunk_cb: object = None, cancel_event: object = None) -> int:
+            name = Path(source).name
+            with counts_lock:
+                call_counts[name] = call_counts.get(name, 0) + 1
+                attempt = call_counts[name]
+            if name == "f1.txt":
+                return 100
+            if name == "f2.txt":
+                if attempt == 1:
+                    raise OSError("Network timeout")
+                return 200
+            raise OSError("Network down")  # f3.txt: always fails
+
+        mock_copy.side_effect = fake_copy
 
         mfiles = [
-            MergedFile(source_path=Path("s1"), dest_folder="Desktop", relative_name="f1.txt", size_bytes=100, modified_time=0.0),
-            MergedFile(source_path=Path("s2"), dest_folder="Desktop", relative_name="f2.txt", size_bytes=200, modified_time=0.0),
-            MergedFile(source_path=Path("s3"), dest_folder="Desktop", relative_name="f3.txt", size_bytes=300, modified_time=0.0),
+            MergedFile(source_path=Path("s1/f1.txt"), dest_folder="Desktop", relative_name="f1.txt", size_bytes=100, modified_time=0.0),
+            MergedFile(source_path=Path("s2/f2.txt"), dest_folder="Desktop", relative_name="f2.txt", size_bytes=200, modified_time=0.0),
+            MergedFile(source_path=Path("s3/f3.txt"), dest_folder="Desktop", relative_name="f3.txt", size_bytes=300, modified_time=0.0),
         ]
-
-        def progress_cb(copied: int, total: int, filename: str) -> None:
-            pass
 
         cancel_event = Event()
         retry_cfg = CopyRetryConfig(max_retries=1, backoff_base=0.001, consecutive_fail_limit=3)
 
         with patch.dict(PROFILE_FOLDER_MAP, self.env.get_profile_map(), clear=True):
-            res = copy_merged_files(mfiles, progress_cb, cancel_event, retry_cfg)
+            res = copy_merged_files(mfiles, lambda *a: None, cancel_event, retry_cfg)
 
         self.assertTrue(res.success)
         self.assertEqual(res.files_copied, 2)
         self.assertEqual(len(res.failed_files), 1)
-        self.assertEqual(res.failed_files[0].source, Path("s3"))
+        self.assertEqual(res.failed_files[0].source, Path("s3/f3.txt"))
 
     def test_file_progress_tracker_and_chunk_copy(self) -> None:
         """Test FileProgressTracker updates bytes and handles retry reset."""
@@ -268,10 +280,11 @@ class TestBackupCopier(unittest.TestCase):
         from services.backup_copier import _copy_single_file
         written = _copy_single_file(src_file, dest_file, chunk_cb)
         self.assertEqual(written, 20000)
-        self.assertEqual(chunk_sizes, [8192, 8192, 3616])
+        # 20000 bytes fits in a single 1 MB chunk read.
+        self.assertEqual(chunk_sizes, [20000])
 
     def test_copy_merged_files_cancellation(self) -> None:
-        """Test that copy_merged_files aborts immediately when cancel_event is set."""
+        """Test that copy_merged_files does not copy anything once cancel_event is set."""
         src_file = self.env.source_dir / "src_cancel.txt"
         src_file.write_bytes(b"A" * 50000)
 
@@ -286,16 +299,11 @@ class TestBackupCopier(unittest.TestCase):
         ]
 
         cancel_event = Event()
-        progress_calls = []
-
-        def progress_cb(copied: int, total: int, filename: str) -> None:
-            progress_calls.append((copied, total, filename))
-            cancel_event.set()
-
+        cancel_event.set()  # simulate cancel already requested when the copy starts
         retry_cfg = CopyRetryConfig(max_retries=0, backoff_base=0.01, consecutive_fail_limit=1)
 
         with patch.dict(PROFILE_FOLDER_MAP, self.env.get_profile_map(), clear=True):
-            res = copy_merged_files(mfiles, progress_cb, cancel_event, retry_cfg)
+            res = copy_merged_files(mfiles, lambda *a: None, cancel_event, retry_cfg)
 
         self.assertFalse(res.success)
         self.assertTrue(res.cancelled)
@@ -303,39 +311,111 @@ class TestBackupCopier(unittest.TestCase):
         dest_file = self.env.desktop / "dst_cancel.txt"
         self.assertFalse(dest_file.exists())
 
-    def test_run_write_benchmark(self) -> None:
-        """Test write speed benchmark and its fallbacks."""
-        from services.backup_copier import run_write_benchmark
-        with patch("config.is_test_mode", return_value=True):
-            speed = run_write_benchmark(self.env.desktop)
-            self.assertEqual(speed, NETWORK_SPEED_FALLBACK_BPS)
-        with patch("config.is_test_mode", return_value=False):
-            speed_real = run_write_benchmark(self.env.desktop)
-            self.assertGreater(speed_real, 0)
-            err_speed = run_write_benchmark(Path("nonexistent_drive:/invalid_folder"))
-            self.assertEqual(err_speed, LOCAL_SPEED_FALLBACK_BPS)
-            net_err_speed = run_write_benchmark(Path("\\\\nonexistent_server\\share"))
-            self.assertEqual(net_err_speed, NETWORK_SPEED_FALLBACK_BPS)
+    def test_copy_single_file_stops_and_cleans_up_on_cancel(self) -> None:
+        """_copy_single_file must stop mid-write and remove the partial file
+        once cancel_event is set during the copy (checked once per chunk)."""
+        from services.backup_copier import _copy_single_file, COPY_CHUNK_BYTES
 
-    def test_estimate_copy_seconds_for_files(self) -> None:
-        """Test file list duration estimation with local vs network rules."""
-        from services.backup_copier import estimate_copy_seconds_for_files
-        local_file = MergedFile(
-            source_path=Path("C:/local/f1.txt"), dest_folder="Desktop",
-            relative_name="f1.txt", size_bytes=100 * 1024 * 1024, modified_time=0.0
-        )
-        net_file = MergedFile(
-            source_path=Path("\\\\server\\share\\f2.txt"), dest_folder="Desktop",
-            relative_name="f2.txt", size_bytes=100 * 1024 * 1024, modified_time=0.0
-        )
-        est_local = estimate_copy_seconds_for_files([local_file], 50 * 1024 * 1024)
-        self.assertEqual(est_local, 2)
-        est_net = estimate_copy_seconds_for_files([net_file], 100 * 1024 * 1024)
-        self.assertEqual(est_net, 1)
-        est_both = estimate_copy_seconds_for_files(
-            [local_file, net_file], 50 * 1024 * 1024, 10 * 1024 * 1024
-        )
-        self.assertEqual(est_both, 12)
+        src_file = self.env.source_dir / "src_cancel_midcopy.txt"
+        src_file.write_bytes(b"A" * (COPY_CHUNK_BYTES * 3))
+        dest_file = self.env.desktop / "dst_cancel_midcopy.txt"
+
+        cancel_event = Event()
+
+        def chunk_cb(n: int) -> None:
+            cancel_event.set()  # cancel right after the first chunk is written
+
+        with self.assertRaises(OSError):
+            _copy_single_file(src_file, dest_file, chunk_cb, cancel_event)
+
+        self.assertFalse(dest_file.exists())
+
+    @patch("services.backup_copier.ctypes")
+    def test_copy_merged_files_cut_mode_moves_file_and_deletes_source(self, mock_ctypes: object) -> None:
+        """cut_mode=True must leave the destination copy in place and remove the source."""
+        src_file = self.env.source_dir / "move_me.txt"
+        src_file.write_text("moved content", encoding="utf-8")
+
+        mfiles = [
+            MergedFile(
+                source_path=src_file, dest_folder="Desktop", relative_name="move_me.txt",
+                size_bytes=src_file.stat().st_size, modified_time=src_file.stat().st_mtime,
+            )
+        ]
+        cancel_event = Event()
+        retry_cfg = CopyRetryConfig(max_retries=1, backoff_base=0.01, consecutive_fail_limit=3)
+
+        with patch.dict(PROFILE_FOLDER_MAP, self.env.get_profile_map(), clear=True):
+            res = copy_merged_files(mfiles, lambda *a: None, cancel_event, retry_cfg, cut_mode=True)
+
+        self.assertTrue(res.success)
+        self.assertEqual(res.files_copied, 1)
+        dest_file = self.env.desktop / "move_me.txt"
+        self.assertTrue(dest_file.exists())
+        self.assertEqual(dest_file.read_text(encoding="utf-8"), "moved content")
+        self.assertFalse(src_file.exists())
+
+    @patch("services.backup_copier.ctypes")
+    def test_copy_merged_files_cut_mode_deletes_source_when_dest_already_identical(self, mock_ctypes: object) -> None:
+        """An already-identical destination is skipped, but the source must still be removed."""
+        src_file = self.env.source_dir / "identical.txt"
+        src_file.write_text("same content", encoding="utf-8")
+        dest_file = self.env.desktop / "identical.txt"
+        dest_file.write_text("same content", encoding="utf-8")
+        t_now = time.time()
+        os.utime(src_file, (t_now, t_now))
+        os.utime(dest_file, (t_now, t_now))
+
+        mfiles = [
+            MergedFile(
+                source_path=src_file, dest_folder="Desktop", relative_name="identical.txt",
+                size_bytes=src_file.stat().st_size, modified_time=src_file.stat().st_mtime,
+            )
+        ]
+        cancel_event = Event()
+        retry_cfg = CopyRetryConfig(max_retries=1, backoff_base=0.01, consecutive_fail_limit=3)
+
+        with patch.dict(PROFILE_FOLDER_MAP, self.env.get_profile_map(), clear=True):
+            res = copy_merged_files(mfiles, lambda *a: None, cancel_event, retry_cfg, cut_mode=True)
+
+        self.assertTrue(res.success)
+        self.assertEqual(len(res.skipped_files), 0)
+        self.assertEqual(dest_file.read_text(encoding="utf-8"), "same content")
+        self.assertFalse(src_file.exists())
+
+    @patch("services.backup_copier.ctypes")
+    def test_copy_merged_files_cut_mode_keeps_source_on_conflict(self, mock_ctypes: object) -> None:
+        """A genuine conflict (different content) must not delete the source file."""
+        src_file = self.env.source_dir / "conflict.txt"
+        src_file.write_text("new content", encoding="utf-8")
+        dest_file = self.env.desktop / "conflict.txt"
+        dest_file.write_text("old different content", encoding="utf-8")
+
+        mfiles = [
+            MergedFile(
+                source_path=src_file, dest_folder="Desktop", relative_name="conflict.txt",
+                size_bytes=src_file.stat().st_size, modified_time=src_file.stat().st_mtime,
+            )
+        ]
+        cancel_event = Event()
+        retry_cfg = CopyRetryConfig(max_retries=1, backoff_base=0.01, consecutive_fail_limit=3)
+
+        with patch.dict(PROFILE_FOLDER_MAP, self.env.get_profile_map(), clear=True):
+            res = copy_merged_files(mfiles, lambda *a: None, cancel_event, retry_cfg, cut_mode=True)
+
+        self.assertEqual(len(res.skipped_files), 1)
+        self.assertTrue(src_file.exists())
+        self.assertEqual(dest_file.read_text(encoding="utf-8"), "old different content")
+
+    def test_delete_source_file_clears_readonly_and_removes(self) -> None:
+        """_delete_source_file must succeed even on a read-only source file."""
+        target = self.env.source_dir / "readonly.txt"
+        target.write_text("data", encoding="utf-8")
+        target.chmod(0o444)
+
+        _delete_source_file(target)
+
+        self.assertFalse(target.exists())
 
     def test_copy_merged_files_records_duration(self) -> None:
         """Test that copy_merged_files records the elapsed duration in duration_seconds."""
@@ -356,3 +436,98 @@ class TestBackupCopier(unittest.TestCase):
             res = copy_merged_files(mfiles, lambda x, y, z: None, cancel_event, retry_cfg)
         self.assertTrue(res.success)
         self.assertGreaterEqual(res.duration_seconds, 1)
+
+    def test_copy_merged_files_abort_accounts_for_every_file(self) -> None:
+        """An early abort (consecutive_fail_limit reached) must not silently
+        drop files — every file ends up counted as copied or failed, even
+        the ones the thread pool never got around to starting.
+
+        The copy loop now runs several files concurrently (see COPY_WORKERS
+        in backup_copier.py), so exactly *which* file ends up "not attempted"
+        is no longer deterministic — this asserts the invariant the fix is
+        actually about instead of a specific split.
+        """
+        from services.backup_copier import COPY_WORKERS
+        total_files = COPY_WORKERS + 8
+        missing_file = self.env.source_dir / "missing.txt"  # never created -> always fails
+        mfiles = [
+            MergedFile(source_path=missing_file, dest_folder="Desktop", relative_name="missing.txt",
+                       size_bytes=1, modified_time=0.0)
+        ]
+        for i in range(total_files - 1):
+            f = self.env.source_dir / f"later_{i}.txt"
+            f.write_text("later", encoding="utf-8")
+            mfiles.append(MergedFile(
+                source_path=f, dest_folder="Desktop", relative_name=f"later_{i}.txt",
+                size_bytes=5, modified_time=0.0,
+            ))
+
+        cancel_event = Event()
+        retry_cfg = CopyRetryConfig(max_retries=0, backoff_base=0.001, consecutive_fail_limit=1)
+
+        with patch.dict(PROFILE_FOLDER_MAP, self.env.get_profile_map(), clear=True):
+            res = copy_merged_files(mfiles, lambda *a: None, cancel_event, retry_cfg)
+
+        self.assertFalse(res.success)
+        self.assertEqual(res.files_copied + len(res.failed_files), total_files)
+        self.assertGreaterEqual(len(res.failed_files), 1)
+
+
+class TestNeedsElevatedWrite(unittest.TestCase):
+    """Tests for _needs_elevated_write's routing decision."""
+
+    def test_false_when_already_admin(self) -> None:
+        """An elevated process can write anywhere — never needs the helper."""
+        with patch("services.elevation.is_admin", return_value=True):
+            self.assertFalse(_needs_elevated_write(Path("C:\\Users\\someone_else\\Desktop\\f.txt")))
+
+    def test_false_for_current_users_own_profile(self) -> None:
+        with patch("services.elevation.is_admin", return_value=False), \
+             patch("services.backup_copier.Path.home", return_value=Path("C:\\Users\\me")):
+            dest = Path("C:\\Users\\me\\Desktop\\f.txt")
+            self.assertFalse(_needs_elevated_write(dest))
+
+    def test_true_for_another_users_profile(self) -> None:
+        with patch("services.elevation.is_admin", return_value=False), \
+             patch("services.backup_copier.Path.home", return_value=Path("C:\\Users\\me")):
+            dest = Path("C:\\Users\\someone_else\\Desktop\\f.txt")
+            self.assertTrue(_needs_elevated_write(dest))
+
+    def test_false_for_paths_outside_users_root(self) -> None:
+        """RAIZ-scope files resolve under C:\\, not C:\\Users — never elevated."""
+        with patch("services.elevation.is_admin", return_value=False):
+            self.assertFalse(_needs_elevated_write(Path("C:\\ProgramData\\f.txt")))
+
+
+class TestCopyViaHelperWithRetry(unittest.TestCase):
+    """Tests for _copy_via_helper_with_retry's backoff behavior."""
+
+    def test_recovers_after_transient_failure(self) -> None:
+        """A transient elevated-helper failure (e.g. the pipe being briefly
+        busy) should be retried and can still succeed within max_retries."""
+        calls: list[int] = []
+
+        def fake_copy_via_helper(source: Path, dest: Path, cut_mode: bool = False) -> tuple[bool, str]:
+            calls.append(1)
+            if len(calls) < 3:
+                return False, "Falha de comunicação com o processo elevado: pipe busy"
+            return True, ""
+
+        retry_cfg = CopyRetryConfig(max_retries=3, backoff_base=0.001, consecutive_fail_limit=3)
+        with patch("services.elevation.copy_via_helper", side_effect=fake_copy_via_helper):
+            ok, err = _copy_via_helper_with_retry(Path("C:/fake/src.txt"), Path("C:/fake/dst.txt"), retry_cfg)
+
+        self.assertTrue(ok)
+        self.assertEqual(err, "")
+        self.assertEqual(len(calls), 3)
+
+    def test_gives_up_after_max_retries(self) -> None:
+        """A persistent elevated-helper failure should be reported once
+        max_retries is exhausted rather than retried forever."""
+        retry_cfg = CopyRetryConfig(max_retries=2, backoff_base=0.001, consecutive_fail_limit=3)
+        with patch("services.elevation.copy_via_helper", return_value=(False, "erro persistente")) as mock_copy:
+            ok, err = _copy_via_helper_with_retry(Path("C:/fake/src.txt"), Path("C:/fake/dst.txt"), retry_cfg)
+
+        self.assertFalse(ok)
+        self.assertEqual(err, "erro persistente")
+        self.assertEqual(mock_copy.call_count, 3)

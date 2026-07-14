@@ -52,7 +52,7 @@ class WelcomeView(QWidget):
 
     start_requested = pyqtSignal()
     about_requested = pyqtSignal()
-    admin_mode_unlocked = pyqtSignal()
+    admin_mode_requested = pyqtSignal()
 
 
     def __init__(self, parent: QWidget = None) -> None:
@@ -184,15 +184,7 @@ class WelcomeView(QWidget):
         layout.addWidget(footer_widget)
 
     def _on_admin_clicked(self) -> None:
-        """Prompt user for admin password and navigate to admin view on success."""
-        from ui.dialogs import AdminAuthDialog
-        from config import get_admin_password
-        from PyQt5.QtWidgets import QMessageBox
-
-        dlg = AdminAuthDialog(self)
-        if dlg.exec():
-            if dlg.get_password() == get_admin_password():
-                self.admin_mode_unlocked.emit()
-            else:
-                QMessageBox.critical(self, "Erro", "Senha inválida.", QMessageBox.Ok)
+        """Request admin mode — gated by a Windows UAC prompt (see
+        MainWindow._request_admin_mode) instead of an in-app password."""
+        self.admin_mode_requested.emit()
 

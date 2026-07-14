@@ -16,7 +16,7 @@ from PyQt5.QtWidgets import (
     QPushButton, QScrollArea, QFrame,
 )
 
-from services.backup_copier import CopyResult
+from services.backup_copier import CopyResult, SkippedFile
 from ui.components import BentoBox
 from ui.format_utils import format_bytes as _format_bytes, format_time as _format_time
 
@@ -31,6 +31,7 @@ class SummaryView(QWidget):
 
     copy_skipped_requested = pyqtSignal()
     finish_requested = pyqtSignal()
+    try_other_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -68,7 +69,7 @@ class SummaryView(QWidget):
         self._bytes_card = BentoBox("VOLUME TRANSFERIDO", "0 B", "Tamanho consolidado")
         self._time_card = BentoBox("TEMPO DE OPERAÇÃO", "--", "Tempo total decorrido")
 
-        card_width = 160
+        card_width = 180
         self._files_card.setFixedWidth(card_width)
         self._bytes_card.setFixedWidth(card_width)
         self._time_card.setFixedWidth(card_width)
@@ -122,7 +123,15 @@ class SummaryView(QWidget):
 
     def _init_navigation_section(self, layout: QVBoxLayout) -> None:
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(12)
         btn_row.addStretch()
+
+        self._try_other_btn = QPushButton("Tentar outra coisa")
+        self._try_other_btn.setObjectName("SecondaryButton")
+        self._try_other_btn.setCursor(Qt.PointingHandCursor)
+        self._try_other_btn.clicked.connect(self.try_other_requested.emit)
+        self._try_other_btn.setVisible(False)
+        btn_row.addWidget(self._try_other_btn)
 
         self._finish_btn = QPushButton("Concluir")
         self._finish_btn.setObjectName("PrimaryButton")
@@ -137,7 +146,7 @@ class SummaryView(QWidget):
     # Public API
     # ------------------------------------------------------------------
 
-    def populate(self, result: CopyResult) -> None:
+    def populate(self, result: CopyResult, admin_mode: bool = False) -> None:
         """Fill in the summary with the copy result.
 
         Example:
@@ -145,6 +154,7 @@ class SummaryView(QWidget):
         """
         self._set_outcome_display(result)
         self._set_skipped_section(result)
+        self._try_other_btn.setVisible(admin_mode)
 
     def on_skipped_copy_done(self, success: bool, message: str) -> None:
         """Called when CopySkippedWorker finishes.
@@ -185,16 +195,25 @@ class SummaryView(QWidget):
         self._update_outcome_header(result)
 
     def _update_outcome_header(self, result: CopyResult) -> None:
-        """Update header text and color based on copy result."""
+        """Update header text and color based on copy result.
+
+        The title reflects how many files actually made it, not just the
+        internal success flag: e.g. 911 copied + 4 failed is a partial
+        success, not a failure — "RESTAURAÇÃO FALHOU" is reserved for runs
+        where nothing was restored at all.
+        """
         from ui.assets import RM_GREEN, RM_RED, RM_YELLOW
+        n_issues = len(result.skipped_files) + len(result.failed_files)
         if result.cancelled:
             self._set_header_lbl("RESTAURAÇÃO CANCELADA", RM_RED, "A cópia foi cancelada pelo usuário.")
-        elif not result.success:
-            self._set_header_lbl("RESTAURAÇÃO FALHOU", RM_RED, "Ocorreu um erro crítico na cópia.")
-        elif result.skipped_files:
-            n = len(result.skipped_files)
-            suffix = "arquivo pulado" if n == 1 else "arquivos pulados"
-            self._set_header_lbl("CONCLUÍDO COM CONFLITOS", RM_YELLOW, f"{n} {suffix} detectados.")
+        elif result.files_copied == 0:
+            self._set_header_lbl("RESTAURAÇÃO FALHOU", RM_RED, "Nenhum arquivo pôde ser restaurado.")
+        elif n_issues:
+            suffix = "arquivo pulado" if n_issues == 1 else "arquivos pulados"
+            self._set_header_lbl(
+                "SUCESSO PARCIAL", RM_YELLOW,
+                f"{result.files_copied} arquivos restaurados, {n_issues} {suffix}.",
+            )
         else:
             self._set_header_lbl("SUCESSO", RM_GREEN, "Todos os arquivos recuperados com sucesso!")
 

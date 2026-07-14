@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Unit tests for backup_simulator.py copy simulator."""
 import unittest
+import unittest.mock
 from pathlib import Path
 from threading import Event
 

@@ -59,7 +59,7 @@ class AboutView(QWidget):
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
 
-        subtitle = QLabel("Desenvolvido por STII — Seção de Tecnologia da Informação e Inovação", self)
+        subtitle = QLabel("Solucionado por Tiago Vieira e Jean S.\nDesenvolvido na Secretaria de Tecnologia e Inovação de Caraguatatuba/SP.\n\n2026 © Todos os direitos reservados.", self)
         subtitle.setObjectName("ViewSubtitle")
         subtitle.setAlignment(Qt.AlignCenter)
         layout.addWidget(subtitle)
@@ -81,8 +81,7 @@ class AboutView(QWidget):
             f"Usuário logado: {login}",
             f"Identificação da máquina: {hostname} ({mid})",
             f"Servidor de backups: {server_cfg.server_ip} (share: {server_cfg.backup_share})",
-            f"Modo de teste: {'Ativo' if is_test_mode() else 'Inativo'}",
-            f"Plataforma: {platform.system()} {platform.release()} (Python {py_ver})"
+            f"Modo de teste: {'Ativo' if is_test_mode() else 'Inativo'}"
         ]
 
     def _create_info_card(self) -> QFrame:

@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from services.admin_backup_discovery import (
     PENDING_STATS,
+    ERROR_STATS,
     AdminBackupSource,
     UserProfileDetail,
     _has_any_file,
@@ -119,6 +120,60 @@ class TestBuildAdminSourceAndLazyDetails(unittest.TestCase):
         self.assertEqual(detailed.total_bytes, len("hello world") + len("data"))
 
 
+class TestLoadSourceDetailsErrorHandling(unittest.TestCase):
+    """load_source_details() must degrade a single failed walk to ERROR_STATS
+    instead of losing the whole source, and report progress incrementally."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "RAIZ" / "sub").mkdir(parents=True)
+        (self.tmp / "RAIZ" / "sub" / "file.txt").write_text("hello world")
+        (self.tmp / "USUARIOS" / "29107" / "Desktop").mkdir(parents=True)
+        (self.tmp / "USUARIOS" / "29107" / "Desktop" / "a.txt").write_text("data")
+
+    def test_raiz_walk_failure_yields_error_stats_without_losing_profiles(self) -> None:
+        src = build_admin_source(self.tmp, "local")
+        with patch(
+            "services.admin_backup_discovery.get_raiz_detail",
+            side_effect=OSError("network share unreachable"),
+        ):
+            detailed = load_source_details(src)
+        self.assertEqual(detailed.raiz.file_count, ERROR_STATS)
+        self.assertEqual(detailed.raiz.dir_count, ERROR_STATS)
+        # A raiz failure shouldn't drop the profile that walked successfully.
+        self.assertEqual(detailed.profiles[0].size_bytes, len("data"))
+        # ERROR_STATS-sized raiz must not be added into the visible total.
+        self.assertEqual(detailed.total_bytes, len("data"))
+
+    def test_profile_walk_failure_yields_error_stats_for_that_profile_only(self) -> None:
+        (self.tmp / "USUARIOS" / "88888" / "Desktop").mkdir(parents=True)
+        (self.tmp / "USUARIOS" / "88888" / "Desktop" / "b.txt").write_text("more data")
+        src = build_admin_source(self.tmp, "local")
+
+        from services.admin_backup_discovery import get_profile_detail as real_get_profile_detail
+
+        def flaky(user_path: Path):
+            if user_path.name == "29107":
+                raise OSError("permission denied")
+            return real_get_profile_detail(user_path)
+
+        with patch("services.admin_backup_discovery.get_profile_detail", side_effect=flaky):
+            detailed = load_source_details(src)
+
+        by_name = {p.name: p for p in detailed.profiles}
+        self.assertEqual(by_name["29107"].file_count, ERROR_STATS)
+        self.assertEqual(by_name["88888"].size_bytes, len("more data"))
+        # The healthy profile's bytes count; the errored one's don't.
+        self.assertEqual(detailed.total_bytes, len("hello world") + len("more data"))
+
+    def test_progress_cb_invoked_once_per_completed_walk(self) -> None:
+        src = build_admin_source(self.tmp, "local")
+        calls = []
+        load_source_details(src, progress_cb=calls.append)
+        # One raiz walk + one profile walk == 2 completions.
+        self.assertEqual(len(calls), 2)
+
+
 class TestSourceMatchesTerms(unittest.TestCase):
     """_source_matches_terms re-validates a query match against the final,
     content-filtered source (the 'lello' empty-profile bug)."""
@@ -195,6 +250,52 @@ class TestScanAdminBackupsQueryValidation(unittest.TestCase):
         cancel_event.set()
         results = self._scan("someone", machine, cancel_event=cancel_event)
         self.assertEqual(results, [])
+
+
+class TestDiscoveryCache(unittest.TestCase):
+    """_DISCOVERY_CACHE avoids re-hitting the network share on every search
+    within the TTL window — see scan_admin_backups' Phase 1 comment."""
+
+    def setUp(self) -> None:
+        import services.admin_backup_discovery as m
+        self.m = m
+        self.m._DISCOVERY_CACHE.clear()
+        # Force the cache path even though we're running under unittest.
+        self.runner_patcher = patch(
+            "services.admin_backup_discovery._is_running_under_test_runner", return_value=False,
+        )
+        self.runner_patcher.start()
+
+    def tearDown(self) -> None:
+        self.runner_patcher.stop()
+        self.m._DISCOVERY_CACHE.clear()
+
+    def _scan(self) -> list:
+        with patch("services.admin_backup_discovery._find_network_candidates", return_value=[]), \
+             patch("services.admin_backup_discovery._find_local_candidates", return_value=[]), \
+             patch("config.is_test_mode", return_value=False):
+            return list(self.m.scan_admin_backups("x", "y"))
+
+    def test_second_scan_within_ttl_reuses_cached_listing(self) -> None:
+        with patch("services.admin_backup_discovery._list_dirs", return_value=[]) as mock_listing:
+            self._scan()
+            self._scan()
+            self.assertEqual(mock_listing.call_count, 1)
+
+    def test_scan_after_ttl_expiry_re_lists_the_share(self) -> None:
+        from config import get_discovery_cache_ttl_seconds
+
+        with patch("services.admin_backup_discovery._list_dirs", return_value=[]) as mock_listing:
+            self._scan()
+            self.assertEqual(mock_listing.call_count, 1)
+            # Simulate the cache entry having aged past the configured TTL.
+            cache_key = ("x", "y")
+            timestamp, candidates, listing = self.m._DISCOVERY_CACHE[cache_key]
+            self.m._DISCOVERY_CACHE[cache_key] = (
+                timestamp - get_discovery_cache_ttl_seconds() - 1, candidates, listing,
+            )
+            self._scan()
+            self.assertEqual(mock_listing.call_count, 2)
 
 
 class TestOriginFor(unittest.TestCase):

@@ -10,7 +10,10 @@ from services.backup_merger import (
     _index_source,
     _merge_indexes,
     group_by_folder,
-    _determine_summary
+    _determine_summary,
+    is_raiz_file,
+    filter_files_by_selection,
+    MergedFile,
 )
 from tests.test_backup_discovery import FakePath
 
@@ -206,5 +209,70 @@ class TestBackupMerger(unittest.TestCase):
         self.assertEqual(len(res.files), 2)
         self.assertEqual(res.total_bytes, 30)
         self.assertEqual(res.source_summary, "Mesclado (rede + local)")
+
+
+class TestIsRaizFile(unittest.TestCase):
+    """is_raiz_file() distinguishes RAIZ-sourced files from profile files —
+    used by ConfirmView and MainWindow to group/filter admin restore selections."""
+
+    def test_true_for_file_under_raiz_folder(self) -> None:
+        mf = MergedFile(
+            source_path=Path("C:/OS_5/RAIZ/Documentos/nota.txt"),
+            dest_folder="Documentos", relative_name="Documentos/nota.txt",
+            size_bytes=1, modified_time=1.0,
+        )
+        self.assertTrue(is_raiz_file(mf))
+
+    def test_false_for_file_under_user_profile(self) -> None:
+        mf = MergedFile(
+            source_path=Path("C:/OS_5/USUARIOS/joao/Desktop/nota.txt"),
+            dest_folder="Desktop", relative_name="nota.txt",
+            size_bytes=1, modified_time=1.0, target_profile="joao",
+        )
+        self.assertFalse(is_raiz_file(mf))
+
+
+class TestFilterFilesBySelection(unittest.TestCase):
+    """filter_files_by_selection() maps ConfirmView's checkbox keys —
+    plain folder, "profile::folder", and "raiz::subfolder" — back onto
+    the MergedFile list that should actually be copied."""
+
+    def _profile_file(self, profile: str, folder: str) -> MergedFile:
+        return MergedFile(
+            source_path=Path(f"C:/OS_5/USUARIOS/{profile}/{folder}/f.txt"),
+            dest_folder=folder, relative_name="f.txt",
+            size_bytes=1, modified_time=1.0, target_profile=profile,
+        )
+
+    def _raiz_file(self, sub_folder: str) -> MergedFile:
+        return MergedFile(
+            source_path=Path(f"C:/OS_5/RAIZ/{sub_folder}/f.txt"),
+            dest_folder=sub_folder, relative_name=f"{sub_folder}/f.txt",
+            size_bytes=1, modified_time=1.0,
+        )
+
+    def test_plain_folder_key_matches_unscoped_file(self) -> None:
+        mf = MergedFile(
+            source_path=Path("C:/Fake/Desktop/f.txt"), dest_folder="Desktop",
+            relative_name="f.txt", size_bytes=1, modified_time=1.0,
+        )
+        self.assertEqual(filter_files_by_selection([mf], ["Desktop"]), [mf])
+        self.assertEqual(filter_files_by_selection([mf], ["Downloads"]), [])
+
+    def test_profile_scoped_key_matches_only_that_profile(self) -> None:
+        joao = self._profile_file("joao", "Desktop")
+        maria = self._profile_file("maria", "Desktop")
+        result = filter_files_by_selection([joao, maria], ["joao::Desktop"])
+        self.assertEqual(result, [joao])
+
+    def test_raiz_scoped_key_matches_raiz_subfolder(self) -> None:
+        raiz_docs = self._raiz_file("Documentos")
+        raiz_other = self._raiz_file("Financeiro")
+        result = filter_files_by_selection([raiz_docs, raiz_other], ["raiz::Documentos"])
+        self.assertEqual(result, [raiz_docs])
+
+    def test_unselected_keys_are_excluded(self) -> None:
+        joao = self._profile_file("joao", "Desktop")
+        self.assertEqual(filter_files_by_selection([joao], []), [])
 
 

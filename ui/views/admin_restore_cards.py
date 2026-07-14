@@ -9,7 +9,7 @@ widget rendering.
 
 from datetime import datetime
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, QSize, pyqtSignal
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QSizePolicy
 from PyQt5.QtGui import QMouseEvent
 
@@ -18,7 +18,7 @@ from ui.assets import (
     RM_HERO_BG, RM_HERO_BORDER,
 )
 from ui.format_utils import format_bytes as _format_bytes
-from services.admin_backup_discovery import AdminBackupSource, UserProfileDetail, PENDING_STATS
+from services.admin_backup_discovery import AdminBackupSource, UserProfileDetail, PENDING_STATS, ERROR_STATS
 
 
 class _ElidedLabel(QLabel):
@@ -39,6 +39,14 @@ class _ElidedLabel(QLabel):
         self._apply_elided_text()
         super().resizeEvent(event)
 
+    def sizeHint(self) -> QSize:
+        height = super().sizeHint().height()
+        return QSize(0, height)
+
+    def minimumSizeHint(self) -> QSize:
+        height = super().minimumSizeHint().height()
+        return QSize(0, height)
+
     def _apply_elided_text(self) -> None:
         # Fall back to the full text if the widget has no real width yet
         # (e.g. before the first layout pass) so the label isn't blanked out.
@@ -48,6 +56,33 @@ class _ElidedLabel(QLabel):
         elided = self.fontMetrics().elidedText(self._full_text, Qt.ElideRight, width)
         super().setText(elided)
         self.setToolTip(self._full_text if elided != self._full_text else "")
+
+
+class SkeletonCard(QFrame):
+    """Placeholder card representing a loading state with shimmer-like aesthetics."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setStyleSheet(f"""
+            SkeletonCard {{
+                background-color: #F7FAFC;
+                border: 1px dashed {RM_BORDER};
+                border-radius: 8px;
+            }}
+        """)
+        self.setFixedHeight(54)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(4)
+
+        t = QLabel("Buscando...", self)
+        t.setStyleSheet("color: #CBD5E0; font-size: 12px; font-weight: bold; background: transparent; border: none; margin: 0px; padding: 0px;")
+        s = QLabel("Aguardando resposta do disco/rede...", self)
+        s.setStyleSheet("color: #E2E8F0; font-size: 11px; background: transparent; border: none; margin: 0px; padding: 0px;")
+
+        layout.addWidget(t)
+        layout.addWidget(s)
 
 
 class SourceCard(QFrame):
@@ -62,6 +97,7 @@ class SourceCard(QFrame):
 
     def _build(self) -> None:
         self.setCursor(Qt.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.update_style()
 
         layout = QVBoxLayout(self)
@@ -69,12 +105,17 @@ class SourceCard(QFrame):
         layout.setSpacing(3)
 
         top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(6)
         name_lbl = _ElidedLabel(self.source.name, self)
         name_lbl.setStyleSheet(
-            "font-weight: bold; font-size: 12px; background: transparent; border: none;"
+            "font-weight: bold; font-size: 12px; background: transparent; border: none; margin: 0px; padding: 0px; padding-right: 2px;"
         )
+        name_lbl.setIndent(0)
         tag = "Rede" if self.source.origin == "network" else "Local"
         tag_lbl = QLabel(tag, self)
+        tag_lbl.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        tag_lbl.setFixedWidth(tag_lbl.sizeHint().width())
         tag_lbl.setStyleSheet(
             f"color: {RM_TEXT_MUTED}; font-size: 10px; background: transparent; border: none;"
         )
@@ -84,8 +125,9 @@ class SourceCard(QFrame):
 
         self._stats_lbl = QLabel(self._stats_text(), self)
         self._stats_lbl.setStyleSheet(
-            f"color: {RM_TEXT_MUTED}; font-size: 11px; background: transparent; border: none;"
+            f"color: {RM_TEXT_MUTED}; font-size: 11px; background: transparent; border: none; margin: 0px; padding: 0px;"
         )
+        self._stats_lbl.setIndent(0)
         layout.addWidget(self._stats_lbl)
 
     def _stats_text(self) -> str:
@@ -167,8 +209,12 @@ class RaizDetailCard(QFrame):
 
     def populate(self, raiz_data: object | None) -> None:
         self.raiz_data = raiz_data
-        if raiz_data and raiz_data.file_count == PENDING_STATS:
-            # Exact size not loaded yet — see AdminSourceDetailWorker.
+        if raiz_data and raiz_data.file_count == ERROR_STATS:
+            self._val_lbl.setText("Erro ao calcular")
+            self._sub_lbl.setText("Falha na leitura do disco/rede")
+            self.setCursor(Qt.ArrowCursor)
+        elif raiz_data and raiz_data.file_count == PENDING_STATS:
+            # Exact size not loaded yet — see AdminSourceDetailRunnable.
             self._val_lbl.setText("Calculando...")
             self._sub_lbl.setText("")
             self.setCursor(Qt.PointingHandCursor)
@@ -238,11 +284,20 @@ class ProfileRow(QFrame):
         date_lbl.setStyleSheet(
             f"color: {RM_TEXT_MUTED}; font-size: 11px; background: transparent; border: none;"
         )
-        # Exact size not loaded yet — see AdminSourceDetailWorker.
-        size_text = "Calculando..." if self.profile.file_count == PENDING_STATS else _format_bytes(self.profile.size_bytes)
+        # Exact size not loaded yet — see AdminSourceDetailRunnable.
+        if self.profile.file_count == ERROR_STATS:
+            size_text = "Erro"
+            size_color = "#E53E3E"
+        elif self.profile.file_count == PENDING_STATS:
+            size_text = "Calculando..."
+            size_color = RM_TEXT_MUTED
+        else:
+            size_text = _format_bytes(self.profile.size_bytes)
+            size_color = RM_ACCENT
+
         size_lbl = QLabel(size_text, self)
         size_lbl.setStyleSheet(
-            f"font-weight: bold; color: {RM_ACCENT}; font-size: 12px; background: transparent; border: none;"
+            f"font-weight: bold; color: {size_color}; font-size: 12px; background: transparent; border: none;"
         )
         layout.addWidget(name_lbl)
         layout.addWidget(date_lbl)

@@ -90,16 +90,18 @@ class TestConfig(unittest.TestCase):
         with patch("config.app_secrets", MockAppName):
             self.assertEqual(config.get_app_name(), "CustomRemos")
 
-    def test_get_admin_password(self) -> None:
-        """Verify get_admin_password resolution and default."""
+    def test_get_discovery_cache_ttl_seconds_default(self) -> None:
+        """Verify the discovery cache TTL default when secrets are not present."""
         with patch("config.app_secrets", None):
-            self.assertEqual(config.get_admin_password(), "superremos")
+            self.assertEqual(config.get_discovery_cache_ttl_seconds(), 30.0)
 
-        class MockAdminPass:
-            ADMIN_PASSWORD = "custom_password"
+    def test_get_discovery_cache_ttl_seconds_custom(self) -> None:
+        """Verify the discovery cache TTL overrides from app_secrets."""
+        class MockSecrets:
+            DISCOVERY_CACHE_TTL_SECONDS = 90.0
 
-        with patch("config.app_secrets", MockAdminPass):
-            self.assertEqual(config.get_admin_password(), "custom_password")
+        with patch("config.app_secrets", MockSecrets):
+            self.assertEqual(config.get_discovery_cache_ttl_seconds(), 90.0)
 
 
 if __name__ == "__main__":

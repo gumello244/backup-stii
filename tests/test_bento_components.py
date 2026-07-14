@@ -3,16 +3,27 @@ from __future__ import annotations
 """Unit tests for Bento Grid design system components."""
 import sys
 import unittest
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QThreadPool
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel
 
 from ui.components import BentoBox, BentoGrid, BentoSpinner
 from ui.views.confirm_view import ConfirmView
+from ui.views.admin_restore_cards import _ElidedLabel
 from services.backup_merger import MergedFileSet, FolderSummary, MergedFile
 from pathlib import Path
 
 # Create a headless QApplication for testing widget classes
 app = QApplication.instance() or QApplication(sys.argv)
+
+
+def tearDownModule() -> None:
+    """Flush queued Qt events and pending QThreadPool work before the next
+    test module runs in this same process (see test_admin_restore's
+    tearDownModule for why this matters — pooled worker threads from other
+    modules can otherwise stall a later module sharing the process)."""
+    QThreadPool.globalInstance().waitForDone(5000)
+    for _ in range(3):
+        app.processEvents()
 
 
 class TestBentoBox(unittest.TestCase):
@@ -173,9 +184,118 @@ class TestConfirmView(unittest.TestCase):
         view._select_all()
         self.assertEqual(len(view._selected_folders()), 2)
 
-        # Verify folder selection card minimum and maximum height constraints
+        # Verify folder selection card can expand vertically instead of being capped.
         self.assertEqual(view._folder_card.minimumHeight(), 146)
-        self.assertEqual(view._folder_card.maximumHeight(), 146)
+        self.assertGreater(view._folder_card.maximumHeight(), view._folder_card.minimumHeight())
+
+
+    class TestElidedLabel(unittest.TestCase):
+        def test_elided_label_size_hint_is_not_text_width(self) -> None:
+            label = _ElidedLabel("A" * 200)
+            self.assertEqual(label.sizeHint().width(), 0)
+
+    def test_confirm_view_splits_same_folder_by_profile_in_admin_mode(self) -> None:
+        """Verify admin restores keep profile-specific rows separate."""
+        view = ConfirmView()
+
+        file1 = MergedFile(
+            source_path=Path("C:/test_src/USUARIOS/12345/Desktop/a.txt"),
+            dest_folder="Desktop",
+            relative_name="a.txt",
+            size_bytes=1024,
+            modified_time=1000.0,
+            target_profile="12345",
+        )
+        file2 = MergedFile(
+            source_path=Path("C:/test_src/USUARIOS/67890/Desktop/b.txt"),
+            dest_folder="Desktop",
+            relative_name="b.txt",
+            size_bytes=2048,
+            modified_time=2000.0,
+            target_profile="67890",
+        )
+
+        merged = MergedFileSet(
+            files=[file1, file2],
+            total_bytes=3072,
+            by_folder={
+                "Desktop": FolderSummary(file_count=2, total_bytes=3072),
+            },
+            source_summary="Admin Source Summary",
+        )
+
+        view.populate(merged, True)
+
+        self.assertIn("12345::Desktop", view._checkboxes)
+        self.assertIn("67890::Desktop", view._checkboxes)
+        self.assertEqual(view._folder_layout.count(), 2)
+
+        selected = view._selected_folders()
+        self.assertEqual(len(selected), 2)
+        self.assertIn("12345::Desktop", selected)
+        self.assertIn("67890::Desktop", selected)
+
+    def test_confirm_view_merged_space_cards_user_mode(self) -> None:
+        """Verify space cards are merged and show user mode title and hero variant."""
+        view = ConfirmView()
+        self.assertFalse(hasattr(view, "_needed_card"))
+        self.assertEqual(view._hero_card._variant, "hero")
+
+        file1 = MergedFile(
+            source_path=Path("C:/test_src/Desktop/a.txt"),
+            dest_folder="Desktop",
+            relative_name="a.txt",
+            size_bytes=100,
+            modified_time=1000.0,
+        )
+        merged = MergedFileSet(
+            files=[file1],
+            total_bytes=100,
+            by_folder={"Desktop": FolderSummary(file_count=1, total_bytes=100)},
+            source_summary="User Summary",
+        )
+        view.populate(merged)
+        self.assertEqual(view._hero_card._title_lbl.text(), "ESPAÇO EM DISCO")
+
+    def test_confirm_view_merged_space_cards_admin_mode(self) -> None:
+        """Verify space cards are merged and show admin mode title."""
+        view = ConfirmView()
+        file1 = MergedFile(
+            source_path=Path("C:/test_src/USUARIOS/12345/Desktop/a.txt"),
+            dest_folder="Desktop",
+            relative_name="a.txt",
+            size_bytes=100,
+            modified_time=1000.0,
+            target_profile="12345",
+        )
+        merged = MergedFileSet(
+            files=[file1],
+            total_bytes=100,
+            by_folder={"Desktop": FolderSummary(file_count=1, total_bytes=100)},
+            source_summary="Admin Summary",
+        )
+        view.populate(merged, True)
+        self.assertEqual(view._hero_card._title_lbl.text(), "ESPAÇO NECESSÁRIO")
+
+    def test_confirm_view_options_card_visibility(self) -> None:
+        """Verify options card visibility is determined by admin mode and local source origin."""
+        view = ConfirmView()
+        self.assertTrue(view._options_card.isHidden())
+
+        file1 = MergedFile(Path("C:/test_src/a.txt"), "Desktop", "a.txt", 100, 1000.0)
+        merged = MergedFileSet(files=[file1], total_bytes=100)
+
+        # Normal mode -> Hidden
+        view.populate(merged, admin_mode=False, is_local=True)
+        self.assertTrue(view._options_card.isHidden())
+
+        # Admin mode + Network source -> Hidden
+        view.populate(merged, admin_mode=True, is_local=False)
+        self.assertTrue(view._options_card.isHidden())
+
+        # Admin mode + Local source -> Visible
+        view.populate(merged, admin_mode=True, is_local=True)
+        self.assertFalse(view._options_card.isHidden())
 
 
 
@@ -204,6 +324,90 @@ class TestSummaryView(unittest.TestCase):
         self.assertEqual(view._files_card._val_lbl.text(), "5 arquivos")
         self.assertEqual(view._bytes_card._val_lbl.text(), "10,0 KB")
         self.assertEqual(view._time_card._val_lbl.text(), "~15 segundos")
+
+    def test_summary_view_try_other_button_visibility(self) -> None:
+        """Verify SummaryView displays the try other button only in admin mode."""
+        from ui.views.summary_view import SummaryView
+        from services.backup_copier import CopyResult
+
+        view = SummaryView()
+        result = CopyResult(
+            success=True,
+            files_copied=1,
+            bytes_copied=10,
+            skipped_files=[],
+            failed_files=[],
+            cancelled=False,
+            duration_seconds=1,
+        )
+
+        view.populate(result, admin_mode=False)
+        self.assertTrue(view._try_other_btn.isHidden())
+
+        view.populate(result, admin_mode=True)
+        self.assertFalse(view._try_other_btn.isHidden())
+
+    def test_summary_view_partial_success_when_some_files_fail(self) -> None:
+        """Most files restored + a few failed must read as partial success,
+        not as a full failure (regression test for the "911 copied, 4 failed
+        still shown as RESTAURAÇÃO FALHOU" bug)."""
+        from ui.views.summary_view import SummaryView
+        from services.backup_copier import CopyResult, SkippedFile
+        from pathlib import Path
+
+        view = SummaryView()
+        result = CopyResult(
+            success=False,
+            files_copied=911,
+            bytes_copied=10240,
+            skipped_files=[],
+            failed_files=[
+                SkippedFile(Path("a.txt"), Path("C:/Users/x/a.txt"), "Permission denied"),
+                SkippedFile(Path("b.txt"), Path("C:/Users/x/b.txt"), "pipe busy"),
+            ],
+            cancelled=False,
+            duration_seconds=15,
+        )
+
+        view.populate(result)
+
+        self.assertEqual(view._outcome_title.text(), "SUCESSO PARCIAL")
+
+    def test_summary_view_failure_when_nothing_copied(self) -> None:
+        """Zero files restored must still read as a full failure."""
+        from ui.views.summary_view import SummaryView
+        from services.backup_copier import CopyResult, SkippedFile
+        from pathlib import Path
+
+        view = SummaryView()
+        result = CopyResult(
+            success=False,
+            files_copied=0,
+            bytes_copied=0,
+            skipped_files=[],
+            failed_files=[SkippedFile(Path("a.txt"), Path("C:/Users/x/a.txt"), "erro")],
+            cancelled=False,
+            duration_seconds=1,
+        )
+
+        view.populate(result)
+
+        self.assertEqual(view._outcome_title.text(), "RESTAURAÇÃO FALHOU")
+
+    def test_summary_view_full_success_when_no_issues(self) -> None:
+        """No skipped or failed files must read as a clean success."""
+        from ui.views.summary_view import SummaryView
+        from services.backup_copier import CopyResult
+
+        view = SummaryView()
+        result = CopyResult(
+            success=True, files_copied=10, bytes_copied=1024,
+            skipped_files=[], failed_files=[], cancelled=False, duration_seconds=1,
+        )
+
+        view.populate(result)
+
+        self.assertEqual(view._outcome_title.text(), "SUCESSO")
 
 
 class TestAnalysisView(unittest.TestCase):
@@ -237,6 +441,29 @@ class TestAnalysisView(unittest.TestCase):
         self.assertEqual(files.maximumWidth(), 320)
         self.assertEqual(files.minimumHeight(), 100)
         self.assertEqual(files.maximumHeight(), 100)
+
+
+class TestContactsFilter(unittest.TestCase):
+    """Verify Contacts folder filtering rules."""
+
+    def test_filter_contacts_folder(self) -> None:
+        """Verify Contacts is ignored if it has only one file, otherwise kept."""
+        from services.backup_merger import filter_contacts_folder, MergedFile
+
+        f1 = MergedFile(Path("Contacts/a.txt"), "Contacts", "a.txt", 10, 1.0, "alice")
+        f2 = MergedFile(Path("Contacts/b.txt"), "Contacts", "b.txt", 10, 1.0, "bob")
+        f3 = MergedFile(Path("Contacts/c.txt"), "Contacts", "c.txt", 10, 1.0, "bob")
+        f4 = MergedFile(Path("Desktop/d.txt"), "Desktop", "d.txt", 10, 1.0, "alice")
+
+        filtered = filter_contacts_folder([f1, f2, f3, f4])
+        # alice has only 1 contacts file (f1) -> ignored
+        # bob has 2 contacts files (f2, f3) -> kept
+        # alice's desktop file is not Contacts -> kept
+        self.assertEqual(len(filtered), 3)
+        self.assertNotIn(f1, filtered)
+        self.assertIn(f2, filtered)
+        self.assertIn(f3, filtered)
+        self.assertIn(f4, filtered)
 
 
 if __name__ == "__main__":

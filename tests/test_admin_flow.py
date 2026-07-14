@@ -1,26 +1,29 @@
 from __future__ import annotations
 
-"""Unit tests for the Remos Admin Mode dialog, view, and password validation flow."""
+"""Unit tests for the Remos Admin Mode view and welcome-screen entry request."""
 import sys
 import unittest
 from unittest.mock import patch, MagicMock
 from PyQt5.QtWidgets import QApplication
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QThreadPool
 
-from ui.dialogs import AdminAuthDialog
 from ui.views.admin_view import AdminView
 
 app = QApplication.instance() or QApplication(sys.argv)
 
 
+def tearDownModule() -> None:
+    """Flush queued Qt events and pending QThreadPool work before the next
+    test module runs in this same process (see test_admin_restore's
+    tearDownModule for why this matters — pooled worker threads from other
+    modules can otherwise stall a later module sharing the process)."""
+    QThreadPool.globalInstance().waitForDone(5000)
+    for _ in range(3):
+        app.processEvents()
+
+
 class TestAdminFlow(unittest.TestCase):
     """Tests for the Admin Mode authentication and dashboard."""
-
-    def test_auth_dialog_password(self) -> None:
-        """Verify AdminAuthDialog inputs and retrieves password correctly."""
-        dlg = AdminAuthDialog()
-        dlg.pwd_input.setText("test_pass")
-        self.assertEqual(dlg.get_password(), "test_pass")
 
     def test_admin_view_cards(self) -> None:
         """Verify AdminView contains the expected Bento option cards."""
@@ -103,53 +106,21 @@ class TestWelcomeView(unittest.TestCase):
         view._logo_btn.clicked.emit()
         self.assertTrue(emitted)
 
-    @patch("ui.dialogs.AdminAuthDialog.exec")
-    @patch("ui.dialogs.AdminAuthDialog.get_password")
-    @patch("config.get_admin_password")
-    def test_admin_mode_unlocked_success(
-        self, mock_get_admin_password: MagicMock, mock_get_password: MagicMock, mock_exec: MagicMock
-    ) -> None:
-        """Verify admin_mode_unlocked is emitted on successful dialog auth."""
+    def test_admin_mode_requested_signal(self) -> None:
+        """Verify clicking 'Modo admin' emits admin_mode_requested directly —
+        entry is now gated by a Windows UAC prompt (MainWindow._request_admin_mode),
+        not an in-app password dialog."""
         from ui.views.welcome_view import WelcomeView
-        mock_exec.return_value = True
-        mock_get_password.return_value = "secret"
-        mock_get_admin_password.return_value = "secret"
-
         view = WelcomeView()
         emitted = False
 
-        def on_unlocked() -> None:
+        def on_requested() -> None:
             nonlocal emitted
             emitted = True
 
-        view.admin_mode_unlocked.connect(on_unlocked)
+        view.admin_mode_requested.connect(on_requested)
         view._admin_btn.click()
         self.assertTrue(emitted)
-
-    @patch("ui.dialogs.AdminAuthDialog.exec")
-    @patch("ui.dialogs.AdminAuthDialog.get_password")
-    @patch("config.get_admin_password")
-    @patch("PyQt5.QtWidgets.QMessageBox.critical")
-    def test_admin_mode_unlocked_failed(
-        self, mock_critical: MagicMock, mock_get_admin_password: MagicMock, mock_get_password: MagicMock, mock_exec: MagicMock
-    ) -> None:
-        """Verify admin_mode_unlocked is NOT emitted and critical message dialog is shown on auth failure."""
-        from ui.views.welcome_view import WelcomeView
-        mock_exec.return_value = True
-        mock_get_password.return_value = "wrong_pwd"
-        mock_get_admin_password.return_value = "secret"
-
-        view = WelcomeView()
-        emitted = False
-
-        def on_unlocked() -> None:
-            nonlocal emitted
-            emitted = True
-
-        view.admin_mode_unlocked.connect(on_unlocked)
-        view._admin_btn.click()
-        self.assertFalse(emitted)
-        mock_critical.assert_called_once()
 
 
 if __name__ == "__main__":

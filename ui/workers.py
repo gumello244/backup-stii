@@ -18,7 +18,7 @@ from pathlib import Path
 from threading import Event
 from typing import Optional
 
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtCore import QThread, pyqtSignal, QRunnable, QObject
 
 from config import (
     get_api_config, get_server_config, get_copy_retry_config,
@@ -273,11 +273,13 @@ class CopyFilesWorker(ThreadedWorker):
         self,
         files: list[MergedFile],
         retry_cfg: Optional[CopyRetryConfig] = None,
+        cut_mode: bool = False,
     ) -> None:
         super().__init__()
         self._files = files
         self._cancel = Event()
         self._retry_cfg = retry_cfg or get_copy_retry_config()
+        self._cut_mode = cut_mode
 
     def run(self) -> None:
         try:
@@ -287,6 +289,7 @@ class CopyFilesWorker(ThreadedWorker):
                 progress_cb=self._on_progress,
                 cancel_event=self._cancel,
                 retry_cfg=self._retry_cfg,
+                cut_mode=self._cut_mode,
             )
             self.finished.emit(result)
         except Exception as exc:
@@ -344,12 +347,35 @@ class BenchmarkWorker(ThreadedWorker):
         self._network_path = network_path
 
     def run(self) -> None:
-        from services.backup_copier import run_write_benchmark
+        from services.copy_benchmark import run_write_benchmark
         local_speed = run_write_benchmark(self._local_path)
         net_speed = 0
         if self._network_path:
             net_speed = run_write_benchmark(self._network_path)
         self.finished.emit(float(local_speed), float(net_speed))
+
+
+class AdminHelperWorker(ThreadedWorker):
+    """Spawns (or confirms) the elevated helper process used to restore into
+    a Windows profile other than the current user's — see services/elevation.py.
+
+    Runs off the UI thread since it may block on the UAC prompt and on the
+    helper's named pipe coming up.
+
+    Example:
+        w = AdminHelperWorker()
+        w.finished.connect(on_started)
+        w.start()
+    """
+    finished = pyqtSignal(bool)  # started_ok
+
+    def run(self) -> None:
+        try:
+            from services.elevation import ensure_helper_started
+            self.finished.emit(ensure_helper_started())
+        except Exception as exc:
+            logger.error('{"event":"admin_helper_worker_error","error":"%s"}', exc)
+            self.finished.emit(False)
 
 
 class AdminPrepareRestoreWorker(ThreadedWorker):
@@ -373,31 +399,29 @@ class AdminPrepareRestoreWorker(ThreadedWorker):
             self.finished.emit([])
 
 
-class AdminSourceDetailWorker(ThreadedWorker):
-    """Compute exact RAIZ/profile sizes for a single selected admin source.
+class WorkerSignals(QObject):
+    finished = pyqtSignal(object)  # AdminBackupSource
+    progress = pyqtSignal(object)  # AdminBackupSource
+    error = pyqtSignal(str)
 
-    Discovery only proves a source has restorable content (cheap probes);
-    the full file-tree walk needed for exact sizes is deferred here so
-    picking one machine from a broad search doesn't pay for statting every
-    match's entire history up front.
 
-    Example:
-        w = AdminSourceDetailWorker(source)
-        w.finished.connect(on_details_loaded)
-        w.start()
+class AdminSourceDetailRunnable(QRunnable):
+    """Compute exact RAIZ/profile sizes for a single selected admin source in parallel.
+
+    Uses QThreadPool and reports progressive updates via signals.
     """
-    finished = pyqtSignal(object)  # AdminBackupSource, with sizes filled in
 
     def __init__(self, source: object) -> None:
         super().__init__()
-        self._source = source
+        self.source = source
+        self.signals = WorkerSignals()
 
     def run(self) -> None:
         try:
             from services.admin_backup_discovery import load_source_details
-            detailed = load_source_details(self._source)
-            self.finished.emit(detailed)
+            detailed = load_source_details(self.source, progress_cb=self.signals.progress.emit)
+            self.signals.finished.emit(detailed)
         except Exception as exc:
             logger.error('{"event":"source_detail_error","error":"%s"}', exc)
-            self.error.emit(str(exc))
-            self.finished.emit(self._source)
+            self.signals.error.emit(str(exc))
+            self.signals.finished.emit(self.source)

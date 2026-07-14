@@ -65,8 +65,8 @@ def asset_path(filename: str) -> str:
     """
     if getattr(sys, "frozen", False):
         base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
-    else:
-        base = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(base, "ui", "assets", filename)
+    base = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base, "assets", filename)
 
 
@@ -84,6 +84,12 @@ QWidget {{
     font-size: 14px;
     color: {RM_TEXT};
     background-color: {RM_BG};
+}}
+QToolTip {{
+    color: #1A202C;
+    background-color: #FFFFFF;
+    border: 1px solid #E2E8F0;
+    font-size: 11px;
 }}
 
 /* ---- Cards / Surfaces ---- */
@@ -278,15 +284,7 @@ QCheckBox#DefaultCheckbox::indicator:hover {{
     border-color: #bbbbbb;
 }}
 
-/* Custom Folder Option Row */
-QFrame#FolderOptionRow {{
-    background-color: #F9F9F9;
-    border: 2px solid #DDDDDD;
-    border-radius: 6px;
-}}
-QFrame#FolderOptionRow:hover {{
-    border-color: #bbbbbb;
-}}
+
 QCheckBox#FolderOptionCheckbox {{
     background: transparent;
     border: none;

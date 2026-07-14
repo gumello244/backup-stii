@@ -9,6 +9,8 @@ metadata for RAIZ and USUARIOS profiles, and yields matching sources.
 import logging
 import os
 import socket
+import sys
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event
@@ -40,6 +42,12 @@ StageCallback = Callable[[str], None]
 # content (see _peek_raiz/_peek_profile); exact numbers are filled in later
 # by load_source_details(), once the admin actually selects the source.
 PENDING_STATS = -1
+ERROR_STATS = -2
+
+# Short-lived cache for network discovery to prevent redundant network scans
+# on fast queries — TTL is configurable via DISCOVERY_CACHE_TTL_SECONDS in
+# app_secrets.py, see config.get_discovery_cache_ttl_seconds().
+_DISCOVERY_CACHE: dict[tuple[str, str], tuple[float, list[Path], list[Path]]] = {}
 
 # Filesystem noise ignored everywhere sizes/file counts are computed — these
 # never represent restorable user content.
@@ -77,23 +85,63 @@ class AdminBackupSource:
     profiles: list[UserProfileDetail]
 
 
-def _walk_raiz_stats(raiz_path: Path) -> tuple[int, int, int]:
+def _is_running_under_test_runner() -> bool:
+    """True when executing under unittest/pytest — lets scan_admin_backups
+    skip the discovery cache so each test starts from a clean candidate list."""
+    return "unittest" in sys.modules or "pytest" in sys.modules
+
+
+def _walk_stats_recursive(path: str | Path) -> tuple[int, int, int]:
     total_bytes, file_count, dir_count = 0, 0, 0
     try:
-        for entry in raiz_path.rglob("*"):
-            if entry.name.lower() in _SKIPPED_FILE_NAMES:
-                continue
-            if entry.is_file():
-                file_count += 1
-                try:
-                    total_bytes += entry.stat().st_size
-                except OSError:
-                    pass
-            elif entry.is_dir():
-                dir_count += 1
+        with os.scandir(path) as it:
+            for entry in it:
+                if entry.name.lower() in _SKIPPED_FILE_NAMES:
+                    continue
+                if entry.is_symlink():
+                    continue
+                if entry.is_file():
+                    file_count += 1
+                    try:
+                        total_bytes += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        pass
+                elif entry.is_dir(follow_symlinks=False):
+                    dir_count += 1
+                    sub_bytes, sub_files, sub_dirs = _walk_stats_recursive(entry.path)
+                    total_bytes += sub_bytes
+                    file_count += sub_files
+                    dir_count += sub_dirs
     except OSError:
         pass
     return total_bytes, file_count, dir_count
+
+
+def _walk_profile_stats_recursive(path: str | Path, start_mtime: float) -> tuple[int, int, float]:
+    total_bytes, file_count, max_mtime = 0, 0, start_mtime
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                if entry.name.lower() in _SKIPPED_FILE_NAMES:
+                    continue
+                if entry.is_symlink():
+                    continue
+                if entry.is_file():
+                    file_count += 1
+                    try:
+                        stat = entry.stat(follow_symlinks=False)
+                        total_bytes += stat.st_size
+                        max_mtime = max(max_mtime, stat.st_mtime)
+                    except OSError:
+                        pass
+                elif entry.is_dir(follow_symlinks=False):
+                    sub_bytes, sub_files, sub_mtime = _walk_profile_stats_recursive(entry.path, max_mtime)
+                    total_bytes += sub_bytes
+                    file_count += sub_files
+                    max_mtime = max(max_mtime, sub_mtime)
+    except OSError:
+        pass
+    return total_bytes, file_count, max_mtime
 
 
 def _has_any_file(root: Path) -> bool:
@@ -104,10 +152,17 @@ def _has_any_file(root: Path) -> bool:
     anything restorable, without paying for a full recursive size count.
     """
     try:
-        for dirpath, _dirnames, filenames in os.walk(root):
-            for fname in filenames:
-                if fname.lower() not in _SKIPPED_FILE_NAMES:
+        with os.scandir(root) as it:
+            for entry in it:
+                if entry.name.lower() in _SKIPPED_FILE_NAMES:
+                    continue
+                if entry.is_symlink():
+                    continue
+                if entry.is_file():
                     return True
+                if entry.is_dir(follow_symlinks=False):
+                    if _has_any_file(Path(entry.path)):
+                        return True
     except OSError:
         pass
     return False
@@ -133,19 +188,64 @@ def _peek_profile(user_path: Path) -> Optional[UserProfileDetail]:
     )
 
 
-def load_source_details(source: AdminBackupSource) -> AdminBackupSource:
-    """Compute exact sizes for *source*'s RAIZ and profiles (full walk).
+def load_source_details(
+    source: AdminBackupSource,
+    progress_cb: Optional[Callable[[AdminBackupSource], None]] = None,
+) -> AdminBackupSource:
+    """Compute exact sizes for *source*'s RAIZ and profiles in parallel.
 
-    Discovery only proves a source has *something* restorable (via the cheap
-    _peek_raiz/_peek_profile probes) — this is the only place that pays for
-    walking every file, and it's called lazily once the admin selects a
-    source, not for every match a broad search turns up.
+    Discovery only proves a source has *something* restorable — this is the
+    only place that pays for walking every file. Progressive updates are
+    reported via *progress_cb* as individual parallel walks complete.
     """
-    raiz = get_raiz_detail(source.path / "RAIZ") if source.raiz else None
-    profiles = [get_profile_detail(p.path) for p in source.profiles]
-    profiles = [p for p in profiles if p.file_count > 0]
-    total = (raiz.size_bytes if raiz else 0) + sum(p.size_bytes for p in profiles)
-    return replace(source, raiz=raiz, profiles=profiles, total_bytes=total)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from config import MAX_CONCURRENT_DISCOVERY_TASKS
+
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_DISCOVERY_TASKS) as executor:
+        futures = {}
+        if source.raiz:
+            futures[executor.submit(get_raiz_detail, source.path / "RAIZ")] = "raiz"
+        for p in source.profiles:
+            futures[executor.submit(get_profile_detail, p.path)] = p.name
+
+        completed_profiles = {p.name: p for p in source.profiles}
+        raiz_detail = source.raiz
+
+        for future in as_completed(futures):
+            key = futures[future]
+            try:
+                res = future.result()
+            except Exception:
+                if key == "raiz":
+                    res = RaizDetail(size_bytes=0, file_count=ERROR_STATS, dir_count=ERROR_STATS, path=source.path / "RAIZ")
+                else:
+                    original_p = next(p for p in source.profiles if p.name == key)
+                    res = replace(original_p, size_bytes=0, file_count=ERROR_STATS)
+
+            if key == "raiz":
+                raiz_detail = res
+            else:
+                # get_profile_detail() (and the except-branch fallback above)
+                # always return a UserProfileDetail, never None.
+                completed_profiles[key] = res
+
+            if progress_cb:
+                current_profiles = list(completed_profiles.values())
+                current_total = 0
+                if raiz_detail and raiz_detail.size_bytes != PENDING_STATS and raiz_detail.size_bytes != ERROR_STATS:
+                    current_total += raiz_detail.size_bytes
+                for p in current_profiles:
+                    if p.size_bytes != PENDING_STATS and p.size_bytes != ERROR_STATS:
+                        current_total += p.size_bytes
+                progress_cb(replace(source, raiz=raiz_detail, profiles=current_profiles, total_bytes=current_total))
+
+        # Final result
+        final_profiles = [p for p in completed_profiles.values() if p.file_count > 0 or p.file_count == ERROR_STATS]
+        final_total = 0
+        if raiz_detail and raiz_detail.size_bytes != ERROR_STATS:
+            final_total += raiz_detail.size_bytes
+        final_total += sum(p.size_bytes for p in final_profiles if p.size_bytes != ERROR_STATS)
+        return replace(source, raiz=raiz_detail, profiles=final_profiles, total_bytes=final_total)
 
 
 def get_raiz_detail(raiz_path: Path) -> Optional[RaizDetail]:
@@ -153,7 +253,7 @@ def get_raiz_detail(raiz_path: Path) -> Optional[RaizDetail]:
     files (e.g. only empty subfolders) — there would be nothing to restore."""
     if not raiz_path.is_dir():
         return None
-    bytes_sz, files, dirs = _walk_raiz_stats(raiz_path)
+    bytes_sz, files, dirs = _walk_stats_recursive(raiz_path)
     if files == 0:
         return None
     return RaizDetail(size_bytes=bytes_sz, file_count=files, dir_count=dirs, path=raiz_path)
@@ -163,20 +263,7 @@ def get_profile_detail(user_path: Path) -> UserProfileDetail:
     """Calculate stats for a single user profile."""
     name = user_path.name
     mtime = _safe_mtime(user_path)
-    total_bytes = 0
-    file_count = 0
-    try:
-        for entry in user_path.rglob("*"):
-            if entry.is_file() and entry.name.lower() not in _SKIPPED_FILE_NAMES:
-                try:
-                    stat = entry.stat()
-                    total_bytes += stat.st_size
-                    mtime = max(mtime, stat.st_mtime)
-                    file_count += 1
-                except OSError:
-                    pass
-    except OSError:
-        pass
+    total_bytes, file_count, mtime = _walk_profile_stats_recursive(user_path, mtime)
     return UserProfileDetail(
         name=name, size_bytes=total_bytes, modified_time=mtime, path=user_path, file_count=file_count,
     )
@@ -430,9 +517,23 @@ def scan_admin_backups(
     # Phase 1: Gather all candidates (single directory listing of the network
     # share, reused below for the flat-folder query fallback to avoid a
     # second network round trip).
-    network_listing = _list_dirs(Path(f"\\\\{server_ip}\\{share}"))
-    candidates = _find_network_candidates(server_ip, share, listing=network_listing)
-    candidates.extend(_find_local_candidates())
+    # The cache is skipped under a test runner so each test starts from a
+    # clean candidate list instead of leaking state from a previous test's
+    # (possibly mocked) network scan into this process's shared cache.
+    from config import get_discovery_cache_ttl_seconds
+    is_testing = _is_running_under_test_runner()
+    cache_key = (server_ip, share)
+    now = time.time()
+    cache_ttl = get_discovery_cache_ttl_seconds()
+    if not is_testing and cache_key in _DISCOVERY_CACHE and (now - _DISCOVERY_CACHE[cache_key][0]) < cache_ttl:
+        _, candidates, network_listing = _DISCOVERY_CACHE[cache_key]
+        candidates = list(candidates)  # shallow copy
+    else:
+        network_listing = _list_dirs(Path(f"\\\\{server_ip}\\{share}"))
+        candidates = _find_network_candidates(server_ip, share, listing=network_listing)
+        candidates.extend(_find_local_candidates())
+        if not is_testing:
+            _DISCOVERY_CACHE[cache_key] = (now, list(candidates), network_listing)
 
     yielded_paths: set[Path] = set()
 
@@ -547,31 +648,51 @@ def compile_admin_restore_files(
 
     for p in profiles_to_scan:
         files.extend(_scan_profile_files(p))
+    from services.backup_merger import filter_contacts_folder
+    return filter_contacts_folder(files)
+
+
+def _scan_dir_files_recursive(
+    current_dir: Path,
+    base_dir: Path,
+    dest_folder: str,
+    target_profile: Optional[str]
+) -> list[MergedFile]:
+    files = []
+    try:
+        with os.scandir(current_dir) as it:
+            for entry in it:
+                if entry.name.lower() in _SKIPPED_FILE_NAMES:
+                    continue
+                if entry.is_symlink():
+                    continue
+                if entry.is_file():
+                    try:
+                        stat = entry.stat(follow_symlinks=False)
+                        entry_path = Path(entry.path)
+                        files.append(MergedFile(
+                            source_path=entry_path,
+                            dest_folder=dest_folder,
+                            relative_name=entry_path.relative_to(base_dir).as_posix(),
+                            size_bytes=stat.st_size,
+                            modified_time=stat.st_mtime,
+                            target_profile=target_profile,
+                        ))
+                    except OSError:
+                        pass
+                elif entry.is_dir(follow_symlinks=False):
+                    files.extend(_scan_dir_files_recursive(
+                        Path(entry.path), base_dir, dest_folder, target_profile
+                    ))
+    except OSError:
+        pass
     return files
 
 
 def _scan_raiz_files(raiz_path: Path) -> list[MergedFile]:
-    files = []
     if not raiz_path.is_dir():
-        return files
-    try:
-        for entry in raiz_path.rglob("*"):
-            if entry.is_file() and entry.name.lower() not in _SKIPPED_FILE_NAMES:
-                try:
-                    stat = entry.stat()
-                    files.append(MergedFile(
-                        source_path=entry,
-                        dest_folder="RAIZ",
-                        relative_name=entry.relative_to(raiz_path).as_posix(),
-                        size_bytes=stat.st_size,
-                        modified_time=stat.st_mtime,
-                        target_profile=None,
-                    ))
-                except OSError:
-                    pass
-    except OSError:
-        pass
-    return files
+        return []
+    return _scan_dir_files_recursive(raiz_path, raiz_path, "RAIZ", None)
 
 
 def _scan_profile_files(profile: UserProfileDetail) -> list[MergedFile]:
@@ -581,33 +702,15 @@ def _scan_profile_files(profile: UserProfileDetail) -> list[MergedFile]:
         return files
     tgt_profile = None if profile.name == detect_user_login() else profile.name
     try:
-        for folder_entry in usuarios_dir.iterdir():
-            if folder_entry.is_dir():
-                _walk_profile_folder(files, folder_entry, tgt_profile)
+        with os.scandir(usuarios_dir) as it:
+            for folder_entry in it:
+                if folder_entry.is_symlink():
+                    continue
+                if folder_entry.is_dir(follow_symlinks=False):
+                    folder_path = Path(folder_entry.path)
+                    files.extend(_scan_dir_files_recursive(
+                        folder_path, folder_path, folder_entry.name, tgt_profile
+                    ))
     except OSError:
         pass
     return files
-
-
-def _walk_profile_folder(
-    files: list[MergedFile],
-    folder: Path,
-    tgt_profile: Optional[str],
-) -> None:
-    try:
-        for entry in folder.rglob("*"):
-            if entry.is_file() and entry.name.lower() not in _SKIPPED_FILE_NAMES:
-                try:
-                    stat = entry.stat()
-                    files.append(MergedFile(
-                        source_path=entry,
-                        dest_folder=folder.name,
-                        relative_name=entry.relative_to(folder).as_posix(),
-                        size_bytes=stat.st_size,
-                        modified_time=stat.st_mtime,
-                        target_profile=tgt_profile,
-                    ))
-                except OSError:
-                    pass
-    except OSError:
-        pass

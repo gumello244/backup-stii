@@ -130,7 +130,8 @@ def _report_crash(
 
 
 def _on_app_quit() -> None:
-    """Graceful shutdown: stop the global async worker."""
+    """Graceful shutdown: stop the global async worker and the elevated
+    admin-restore helper, if one was started this run."""
     try:
         from ui.workers import get_global_worker
         worker = get_global_worker()
@@ -138,7 +139,18 @@ def _on_app_quit() -> None:
             worker.stop()
     except Exception:
         pass
+    try:
+        from services.elevation import shutdown_helper
+        shutdown_helper()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
-    main()
+    from services.elevation import ADMIN_HELPER_FLAG
+    if ADMIN_HELPER_FLAG in sys.argv:
+        _setup_logging()
+        from services.elevation import run_helper_server
+        run_helper_server()
+    else:
+        main()

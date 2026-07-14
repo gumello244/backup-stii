@@ -14,14 +14,13 @@ from dataclasses import dataclass, field
 from typing import Optional
 from pathlib import Path
 
-from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import QMainWindow, QWidget
+from PyQt5.QtWidgets import QMainWindow
 
 from config import get_app_name
-from services.backup_copier import CopyResult, SkippedFile
+from services.backup_copier import CopyResult
 from services.backup_discovery import BackupSource
-from services.backup_merger import MergedFile, MergedFileSet
+from services.backup_merger import MergedFile, MergedFileSet, filter_files_by_selection
 from ui.assets import STYLESHEET, asset_path
 from ui.fade_stack import FadeStackWidget
 from ui.views.welcome_view import WelcomeView
@@ -38,6 +37,7 @@ from ui.workers import (
     CopyFilesWorker,
     CopySkippedWorker,
     BenchmarkWorker,
+    AdminHelperWorker,
     get_global_worker,
 )
 
@@ -137,7 +137,7 @@ class MainWindow(QMainWindow):
         """
         self._welcome.start_requested.connect(self._go_to_analysis)
         self._welcome.about_requested.connect(self._go_to_about)
-        self._welcome.admin_mode_unlocked.connect(self._go_to_admin)
+        self._welcome.admin_mode_requested.connect(self._request_admin_mode)
         self._analysis.next_requested.connect(self._go_to_confirm)
         self._analysis.back_requested.connect(self._go_to_welcome)
         self._analysis.retry_requested.connect(self._retry_discovery)
@@ -146,6 +146,7 @@ class MainWindow(QMainWindow):
         self._progress.cancel_requested.connect(self._cancel_restore)
         self._summary.copy_skipped_requested.connect(self._copy_skipped)
         self._summary.finish_requested.connect(self.close)
+        self._summary.try_other_requested.connect(self._request_admin_mode)
         self._about.back_requested.connect(self._go_to_welcome)
         self._admin.back_requested.connect(self._go_to_welcome)
         self._admin.restore_requested.connect(self._start_admin_restore)
@@ -201,15 +202,44 @@ class MainWindow(QMainWindow):
             self._go_to_welcome()
         """
         self._state.admin_mode = False
+        self._state.sources.clear()
+        self._state.merged = None
         self._stack.navigate_to(_WELCOME)
+        self._start_background_discovery()
 
-    def _go_to_admin(self) -> None:
-        """Navigate to the admin view.
+    def _request_admin_mode(self) -> None:
+        """Gate entry to admin mode behind a Windows UAC prompt instead of
+        the old in-app password: accepting it both proves the user has
+        admin rights on this machine and starts the elevated helper process
+        (see services/elevation.py) that every restore-to-another-profile
+        during this session will reuse — so it's asked once, here.
 
         Example:
-            self._go_to_admin()
+            self._request_admin_mode()
         """
-        self._stack.navigate_to(_ADMIN)
+        if getattr(self, "_admin_helper_worker", None) is not None:
+            return
+        worker = AdminHelperWorker()
+        worker.finished.connect(self._on_admin_mode_elevation_result)
+        self._admin_helper_worker = worker
+        self._workers.append(worker)
+        worker.start()
+
+    def _on_admin_mode_elevation_result(self, started_ok: bool) -> None:
+        """Enter the admin view on a successful UAC prompt, or report why not."""
+        self._admin_helper_worker = None
+        self._report_admin_mode_elevation(started_ok)
+        if started_ok:
+            self._stack.navigate_to(_ADMIN)
+            return
+        logger.warning('{"event":"admin_mode_elevation_failed"}')
+        from PyQt5.QtWidgets import QMessageBox
+        QMessageBox.critical(
+            self, "Modo admin",
+            "Não foi possível habilitar o Modo admin: a elevação de privilégios "
+            "foi cancelada ou falhou.",
+            QMessageBox.Ok,
+        )
 
     def _start_admin_restore(self) -> None:
         """Start the backup restoration flow in admin mode.
@@ -232,7 +262,8 @@ class MainWindow(QMainWindow):
         """Handle transition after admin restore files are compiled."""
         merged = self._state.merged
         if merged:
-            self._confirm.populate(merged)
+            is_local = all(s.origin == "local" for s in self._state.sources) if self._state.sources else True
+            self._confirm.populate(merged, True, is_local)
             self._start_background_benchmarks(merged)
             self._stack.navigate_to(_CONFIRM)
 
@@ -320,7 +351,8 @@ class MainWindow(QMainWindow):
         self._state.merged = merged
         if merged.files:
             self._analysis.set_resolved(merged, self._state.admin_mode)
-            self._confirm.populate(merged)
+            is_local = all(s.origin == "local" for s in self._state.sources) if self._state.sources else True
+            self._confirm.populate(merged, self._state.admin_mode, is_local)
             self._start_background_benchmarks(merged)
         else:
             self._analysis.set_no_source()
@@ -350,10 +382,16 @@ class MainWindow(QMainWindow):
         self._state.selected_folders = selected_folders
         files_to_copy = self._filter_files_by_folders(selected_folders)
 
+        cut_mode = False
+        if self._state.admin_mode and hasattr(self._confirm, "cut_checkbox"):
+            is_local = all(s.origin == "local" for s in self._state.sources) if self._state.sources else True
+            if is_local:
+                cut_mode = self._confirm.cut_checkbox.isChecked()
+
         self._progress.reset()
         self._stack.navigate_to(_PROGRESS)
 
-        self._copy_worker = CopyFilesWorker(files_to_copy)
+        self._copy_worker = CopyFilesWorker(files_to_copy, cut_mode=cut_mode)
         self._copy_worker.progress.connect(self._progress.update_progress)
         self._copy_worker.finished.connect(self._on_copy_finished)
         self._workers.append(self._copy_worker)
@@ -367,16 +405,12 @@ class MainWindow(QMainWindow):
         """Return only merged files whose dest_folder is selected."""
         if not self._state.merged:
             return []
-        folder_set = set(selected_folders)
-        return [
-            f for f in self._state.merged.files
-            if f.dest_folder in folder_set
-        ]
+        return filter_files_by_selection(self._state.merged.files, selected_folders)
 
     def _on_copy_finished(self, result: CopyResult) -> None:
         """Handle copy completion — navigate to summary."""
         self._state.copy_result = result
-        self._summary.populate(result)
+        self._summary.populate(result, self._state.admin_mode)
         self._stack.navigate_to(_SUMMARY)
         self._report_restore_result(result)
 
@@ -408,6 +442,17 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Telemetry helpers
     # ------------------------------------------------------------------
+
+    def _report_admin_mode_elevation(self, started_ok: bool) -> None:
+        w = get_global_worker()
+        if not w.api_service:
+            return
+        if started_ok:
+            w.submit_task(w.api_service.report_success("ADMIN_MODE_ELEVATION"))
+        else:
+            w.submit_task(w.api_service.report_failure(
+                "ADMIN_MODE_ELEVATION", "UAC prompt declined or helper failed to start",
+            ))
 
     def _report_restore_start(self, file_count: int) -> None:
         w = get_global_worker()

@@ -17,19 +17,19 @@ Selection model:
 import logging
 from typing import Optional
 
-from PyQt5.QtCore import Qt, QSize, pyqtSignal
+from PyQt5.QtCore import Qt, QSize, pyqtSignal, QThreadPool
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QLineEdit, QScrollArea, QFrame,
-    QStackedWidget,
+    QStackedWidget, QStyle,
 )
 
 from ui.assets import RM_TEXT_MUTED, RM_BORDER, RM_SURFACE
 from ui.components import BentoSpinner
-from ui.workers import AdminDiscoverSourcesWorker, AdminPrepareRestoreWorker, AdminSourceDetailWorker
-from ui.views.admin_restore_cards import SourceCard, RaizDetailCard, ProfileRow
+from ui.workers import AdminDiscoverSourcesWorker, AdminPrepareRestoreWorker, AdminSourceDetailRunnable
+from ui.views.admin_restore_cards import SourceCard, RaizDetailCard, ProfileRow, SkeletonCard
 from services.admin_backup_discovery import AdminBackupSource, UserProfileDetail, PENDING_STATS
-from services.backup_discovery import extract_machine_id
+from services.backup_discovery import extract_machine_id, detect_user_login
 from services.backup_merger import MergedFileSet, group_by_folder
 
 logger = logging.getLogger(__name__)
@@ -38,10 +38,22 @@ logger = logging.getLogger(__name__)
 _PAGE_SEARCHING = 0
 _PAGE_RESULTS   = 1
 
+_SEARCH_PLACEHOLDER = "Login, hostname, OS"
+
 
 def _source_sort_key(src: AdminBackupSource) -> float:
-    """Return newest profile mtime for sorting (newest-first)."""
-    return max((p.modified_time for p in src.profiles), default=0.0)
+    """Return newest modified time for sorting (newest-first)."""
+    times = [p.modified_time for p in src.profiles if p.modified_time > 0]
+    if src.raiz:
+        try:
+            times.append(src.raiz.path.stat().st_mtime)
+        except OSError:
+            pass
+    try:
+        times.append(src.path.stat().st_mtime)
+    except OSError:
+        pass
+    return max(times, default=0.0)
 
 
 # Search-stage status text, keyed by services.admin_backup_discovery stage ids.
@@ -73,12 +85,20 @@ class AdminRestoreView(QWidget):
         super().__init__(parent)
         self.sources: list[AdminBackupSource] = []
         self.cards: list[SourceCard] = []
+        self.skeleton_cards: list[SkeletonCard] = []
         self.selected_source: Optional[AdminBackupSource] = None
         self.profile_rows: list[ProfileRow] = []
         self.worker: Optional[AdminDiscoverSourcesWorker] = None
         self.prep_worker: Optional[AdminPrepareRestoreWorker] = None
-        self._detail_worker: Optional[AdminSourceDetailWorker] = None
+        self._detail_signals: Optional[object] = None
         self._current_query: Optional[str] = None
+
+        # Track state for restoration preparation to allow navigating away during task.
+        self._processing_source: Optional[AdminBackupSource] = None
+        self._processing_raiz_sel: bool = False
+        self._processing_sel_profiles: set[str] = set()
+        self._processing_any_sub: bool = False
+        self._old_prep_workers: list[object] = []
 
         self._init_ui()
 
@@ -150,6 +170,7 @@ class AdminRestoreView(QWidget):
         lay.setSpacing(6)
 
         hdr_row = QHBoxLayout()
+        hdr_row.setContentsMargins(0, 0, 0, 0)
         hdr_row.setSpacing(6)
         hdr = QLabel("FONTES DE BACKUP", left)
         hdr.setStyleSheet(
@@ -266,7 +287,7 @@ class AdminRestoreView(QWidget):
         self._back_btn = QPushButton("Voltar", self)
         self._back_btn.setObjectName("SecondaryButton")
         self._back_btn.setCursor(Qt.PointingHandCursor)
-        self._back_btn.clicked.connect(self.back_requested.emit)
+        self._back_btn.clicked.connect(self._on_back_or_cancel_clicked)
 
         self._next_btn = QPushButton("Continuar", self)
         self._next_btn.setObjectName("PrimaryButton")
@@ -280,7 +301,7 @@ class AdminRestoreView(QWidget):
 
         # Compact search controls at far right
         self.search_input = QLineEdit(self)
-        self.search_input.setPlaceholderText("Usuário ou hostname...")
+        self.search_input.setPlaceholderText(_SEARCH_PLACEHOLDER)
         self.search_input.setFixedWidth(180)
         self.search_input.setStyleSheet(
             "padding: 4px 8px; border: 1px solid #DDDDDD; border-radius: 6px; font-size: 12px;"
@@ -288,26 +309,37 @@ class AdminRestoreView(QWidget):
         self.search_input.returnPressed.connect(self._on_search_clicked)
         self.search_input.textChanged.connect(self._on_search_text_changed)
 
-        self.search_btn = QPushButton(self)
-        self.search_btn.setToolTip("Buscar")
-        self.search_btn.setFixedSize(30, 30)
-        self.search_btn.setCursor(Qt.PointingHandCursor)
-        # Minimalist SVG magnifying-glass icon via Qt standard pixmap
-        self.search_btn.setIcon(
-            self.style().standardIcon(self.style().SP_FileDialogContentsView)
+        self.search_btn = self._create_small_icon_button(
+            "Busca completa", QStyle.SP_FileDialogContentsView
         )
-        self.search_btn.setIconSize(QSize(16, 16))
-        self.search_btn.setStyleSheet(
+        self.search_btn.clicked.connect(self._on_search_clicked)
+
+        self.current_user_btn = self._create_small_icon_button(
+            "Buscar usuário atual", QStyle.SP_DirHomeIcon
+        )
+        self.current_user_btn.clicked.connect(self._on_current_user_clicked)
+
+        row.addWidget(self.search_input)
+        row.addWidget(self.search_btn)
+        row.addWidget(self.current_user_btn)
+
+        root.addLayout(row)
+
+    def _create_small_icon_button(
+        self, tooltip: str, standard_pixmap: QStyle.StandardPixmap,
+    ) -> QPushButton:
+        button = QPushButton(self)
+        button.setToolTip(tooltip)
+        button.setFixedSize(30, 30)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setIcon(self.style().standardIcon(standard_pixmap))
+        button.setIconSize(QSize(16, 16))
+        button.setStyleSheet(
             f"QPushButton {{ background-color: {RM_SURFACE}; border: 1px solid #DDDDDD;"
             f" border-radius: 6px; }}"
             f"QPushButton:hover {{ background-color: #EDF2F7; }}"
         )
-        self.search_btn.clicked.connect(self._on_search_clicked)
-
-        row.addWidget(self.search_input)
-        row.addWidget(self.search_btn)
-
-        root.addLayout(row)
+        return button
 
     # ------------------------------------------------------------------
     # Public API
@@ -318,12 +350,20 @@ class AdminRestoreView(QWidget):
         self._detach_worker()
         self._current_query = query
         self._clear_sources()
+        self._clear_skeletons()
         self._hide_details()
+        self._reset_search_input(query)
         self._set_status("Buscando backups...")
-        self._stack.setCurrentIndex(_PAGE_SEARCHING)
-        self._spinner.setVisible(True)
+        
+        # Switch to results page immediately to show skeleton loaders
+        self._stack.setCurrentIndex(_PAGE_RESULTS)
         self._header_spinner.setVisible(True)
         self._stage_lbl.setVisible(True)
+
+        for _ in range(3):
+            sk = SkeletonCard(self.sources_container)
+            self.sources_layout.addWidget(sk)
+            self.skeleton_cards.append(sk)
 
         self.worker = AdminDiscoverSourcesWorker(query)
         self.worker.source_found.connect(self._on_source_found)
@@ -362,6 +402,13 @@ class AdminRestoreView(QWidget):
         self.sources.clear()
         self.selected_source = None
 
+    def _clear_skeletons(self) -> None:
+        if self.skeleton_cards:
+            for sk in self.skeleton_cards:
+                self.sources_layout.removeWidget(sk)
+                sk.deleteLater()
+            self.skeleton_cards.clear()
+
     def _hide_details(self) -> None:
         self._right_widget.setVisible(False)
         self._right_placeholder.setVisible(True)
@@ -389,6 +436,11 @@ class AdminRestoreView(QWidget):
 
     def _update_next_button(self) -> None:
         """Derive next-button label and enable-state from current selection."""
+        if self._is_processing():
+            self._next_btn.setText("Processando...")
+            self._next_btn.setEnabled(False)
+            return
+
         if not self.selected_source:
             self._next_btn.setEnabled(False)
             self._next_btn.setText("Continuar")
@@ -396,24 +448,33 @@ class AdminRestoreView(QWidget):
 
         raiz_sel = self._raiz_selected()
         profiles_sel = self._selected_profiles()
-        any_sub = raiz_sel or profiles_sel
+        selected_count = int(raiz_sel) + len(profiles_sel)
+        any_sub = selected_count > 0
 
         if not any_sub:
             # Source selected but nothing drilled into — full restore
-            self._next_btn.setText("Restaurar tudo")
+            self._next_btn.setText("Recuperar tudo")
             self._next_btn.setEnabled(True)
             return
 
-        parts: list[str] = []
-        if raiz_sel:
-            parts.append("RAIZ")
-        if len(profiles_sel) == 1:
-            parts.append(profiles_sel[0].name)
-        elif len(profiles_sel) > 1:
-            parts.append("usuários")
+        if raiz_sel and not profiles_sel:
+            self._next_btn.setText("Recuperar raiz")
+            self._next_btn.setEnabled(True)
+            return
 
-        label = " + ".join(parts)
-        self._next_btn.setText(f"Restaurar {label}")
+        if raiz_sel and len(profiles_sel) == 1:
+            self._next_btn.setText("Recuperar raiz e usuário")
+            self._next_btn.setEnabled(True)
+            return
+
+        if raiz_sel and len(profiles_sel) > 1:
+            self._next_btn.setText("Recuperar raiz e usuários")
+            self._next_btn.setEnabled(True)
+            return
+
+        self._next_btn.setText(
+            "Recuperar usuário" if selected_count == 1 else "Recuperar usuários"
+        )
         self._next_btn.setEnabled(True)
 
     def _compute_scope(self) -> tuple[str, Optional[str]]:
@@ -440,6 +501,7 @@ class AdminRestoreView(QWidget):
     # ------------------------------------------------------------------
 
     def _on_source_found(self, src: AdminBackupSource) -> None:
+        self._clear_skeletons()
         card = SourceCard(src, self.sources_container)
         card.clicked.connect(self._on_source_card_clicked)
         self.sources_layout.addWidget(card)
@@ -469,17 +531,29 @@ class AdminRestoreView(QWidget):
         self._stage_lbl.setText(text)
 
     def _on_discovery_finished(self) -> None:
+        self._clear_skeletons()
         self._header_spinner.setVisible(False)
-        self._stage_lbl.setVisible(False)
-        self._stage_lbl.setText("")
-        if not self.sources:
+        if self.sources:
+            self._stage_lbl.setVisible(True)
+            self._stage_lbl.setText(f"{len(self.sources)} fonte(s) encontrada(s)")
+        else:
+            self._stage_lbl.setVisible(False)
+            self._stage_lbl.setText("")
             self._spinner.setVisible(False)
             self._set_status("Nenhum backup encontrado. Use a busca abaixo.")
             self._stack.setCurrentIndex(_PAGE_SEARCHING)
 
     def _on_search_clicked(self) -> None:
+        if self._is_processing():
+            return
         q = self.search_input.text().strip()
         self.start_discovery(q if q else None)
+
+    def _on_current_user_clicked(self) -> None:
+        if self._is_processing():
+            return
+        login = detect_user_login().strip()
+        self.start_discovery(login if login else None)
 
     def _on_search_text_changed(self, text: str) -> None:
         """Filter already-discovered sources client-side as the user types.
@@ -488,6 +562,15 @@ class AdminRestoreView(QWidget):
         typing must never re-hit the network per keystroke.
         """
         self._apply_client_filter(text.strip().lower())
+
+    def _reset_search_input(self, query: Optional[str]) -> None:
+        placeholder = _SEARCH_PLACEHOLDER if not query else f'Última busca: {query}'
+        self.search_input.blockSignals(True)
+        try:
+            self.search_input.clear()
+            self.search_input.setPlaceholderText(placeholder)
+        finally:
+            self.search_input.blockSignals(False)
 
     def _apply_client_filter(self, query: str) -> None:
         live_cards = []
@@ -535,9 +618,11 @@ class AdminRestoreView(QWidget):
             # Discovery only proved this source has restorable content —
             # exact sizes weren't computed to keep a broad search cheap.
             # Fetch them now that the admin actually picked this one.
-            self._detail_worker = AdminSourceDetailWorker(source)
-            self._detail_worker.finished.connect(self._on_source_details_loaded)
-            self._detail_worker.start()
+            runnable = AdminSourceDetailRunnable(source)
+            runnable.signals.progress.connect(self._on_source_details_loaded)
+            runnable.signals.finished.connect(self._on_source_details_loaded)
+            self._detail_signals = runnable.signals
+            QThreadPool.globalInstance().start(runnable)
 
     def _populate_details(self, source: AdminBackupSource) -> None:
         """(Re)build the RAIZ card and profile rows for *source*."""
@@ -596,14 +681,41 @@ class AdminRestoreView(QWidget):
     # Slots — navigation
     # ------------------------------------------------------------------
 
+    def _is_processing(self) -> bool:
+        return self.prep_worker is not None and self.prep_worker.isRunning()
+
+    def _on_back_or_cancel_clicked(self) -> None:
+        if self._is_processing():
+            if self.prep_worker:
+                try:
+                    self.prep_worker.finished.disconnect(self._on_prepare_finished)
+                except TypeError:
+                    pass
+                self._old_prep_workers.append(self.prep_worker)
+                self.prep_worker = None
+            self._back_btn.setText("Voltar")
+            self.search_btn.setEnabled(True)
+            self.current_user_btn.setEnabled(True)
+            self._update_next_button()
+        else:
+            self.back_requested.emit()
+
     def _on_next_clicked(self) -> None:
         if not self.selected_source:
             return
 
+        # Cache selections for processing session so user can browse other cards
+        self._processing_source = self.selected_source
+        self._processing_raiz_sel = self._raiz_selected()
+        self._processing_sel_profiles = {p.name for p in self._selected_profiles()}
+        self._processing_any_sub = self._processing_raiz_sel or bool(self._processing_sel_profiles)
+
         scope, profile_name = self._compute_scope()
 
         self.search_btn.setEnabled(False)
-        self._back_btn.setEnabled(False)
+        self.current_user_btn.setEnabled(False)
+        self._back_btn.setText("Cancelar")
+        self._back_btn.setEnabled(True)
         self._next_btn.setEnabled(False)
         self._next_btn.setText("Processando...")
 
@@ -616,29 +728,27 @@ class AdminRestoreView(QWidget):
     def _on_prepare_finished(self, files: list) -> None:
         """Filter compiled files to match multi-select, then hand off to ConfirmView."""
         self.search_btn.setEnabled(True)
-        self._back_btn.setEnabled(True)
+        self.current_user_btn.setEnabled(True)
+        self._back_btn.setText("Voltar")
+        self.prep_worker = None
         self._update_next_button()
 
-        raiz_sel = self._raiz_selected()
-        sel_profiles = {p.name for p in self._selected_profiles()}
-        any_sub = raiz_sel or sel_profiles
-
-        # Filter file list when a partial selection was made
-        if any_sub:
+        # Filter file list when a partial selection was made using cached processing scope
+        if self._processing_any_sub:
             files = [
                 f for f in files
-                if (f.dest_folder == "RAIZ" and raiz_sel)
-                or (f.dest_folder != "RAIZ" and f.target_profile in sel_profiles)
-                or (f.dest_folder != "RAIZ" and not sel_profiles)
+                if (f.dest_folder == "RAIZ" and self._processing_raiz_sel)
+                or (f.dest_folder != "RAIZ" and f.target_profile in self._processing_sel_profiles)
+                or (f.dest_folder != "RAIZ" and not self._processing_sel_profiles)
             ]
 
         scope_parts: list[str] = []
-        if raiz_sel:
+        if self._processing_raiz_sel:
             scope_parts.append("RAIZ")
-        if sel_profiles:
-            scope_parts.extend(sorted(sel_profiles))
+        if self._processing_sel_profiles:
+            scope_parts.extend(sorted(self._processing_sel_profiles))
         scope_lbl = " + ".join(scope_parts) if scope_parts else "Tudo"
-        summary = f"{self.selected_source.name} ({scope_lbl})"
+        summary = f"{self._processing_source.name} ({scope_lbl})"
 
         by_folder = group_by_folder(files)
         total = sum(f.size_bytes for f in files)
@@ -652,6 +762,6 @@ class AdminRestoreView(QWidget):
         win = self.window()
         if hasattr(win, "_state"):
             win._state.merged = merged
-            win._state.sources = [self.selected_source]
+            win._state.sources = [self._processing_source]
 
         self.next_requested.emit()

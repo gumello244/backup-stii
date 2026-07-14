@@ -3,7 +3,8 @@ from __future__ import annotations
 """Copy merged files to the user profile with progress, retry, and conflict handling.
 
 Implements:
-  - Chunk-by-chunk copy (8 KB buffer)
+  - Chunk-by-chunk copy (1 MB buffer)
+  - A small thread pool copying independent files concurrently
   - Retry with exponential backoff per file
   - Abort after N consecutive total failures
   - Silent skip of identical files (same name + size + mtime)
@@ -18,7 +19,9 @@ import ctypes
 import logging
 import os
 import shutil
+import threading
 import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event
@@ -26,18 +29,12 @@ from typing import Callable, Optional
 
 from config import (
     CopyRetryConfig,
-    BENCHMARK_FILE_BYTES,
-    BENCHMARK_BLOCK_BYTES,
-    LOCAL_SPEED_FALLBACK_BPS,
-    NETWORK_SPEED_FALLBACK_BPS,
-    WRITE_SPEED_CAP_BPS,
+    COPY_CHUNK_BYTES,
+    COPY_WORKERS,
 )
 from services.backup_merger import MergedFile
 
 logger = logging.getLogger(__name__)
-
-# 8 KB read/write buffer — balances speed vs. memory on old machines
-_CHUNK_SIZE = 8192
 
 # Windows kernel32 constants for SetThreadExecutionState
 _ES_CONTINUOUS = 0x80000000
@@ -162,6 +159,23 @@ def _is_conflict(dest: Path) -> bool:
     return dest.exists()
 
 
+def _needs_elevated_write(dest: Path) -> bool:
+    """True when *dest* sits in another Windows user's profile folder and
+    this process doesn't already hold an admin token — writing there must
+    go through the elevated helper (see services/elevation.py) instead of
+    a direct open()/rename(), which would raise PermissionError.
+    """
+    from services.elevation import is_admin
+    if is_admin():
+        return False
+    try:
+        rel = dest.relative_to("C:\\Users")
+    except ValueError:
+        return False
+    profile = rel.parts[0] if rel.parts else ""
+    return bool(profile) and profile.lower() != Path.home().name.lower()
+
+
 def _prevent_sleep() -> None:
     """Keep Windows system awake during file copy."""
     try:
@@ -196,7 +210,7 @@ def _copy_single_file(
             while True:
                 if cancel_event and cancel_event.is_set():
                     raise OSError("Canceled by user")
-                chunk = src.read(_CHUNK_SIZE)
+                chunk = src.read(COPY_CHUNK_BYTES)
                 if not chunk:
                     break
                 dst.write(chunk)
@@ -258,6 +272,7 @@ def copy_merged_files(
     progress_cb: ProgressCallback,
     cancel_event: Event,
     retry_cfg: CopyRetryConfig,
+    cut_mode: bool = False,
 ) -> CopyResult:
     """Copy all *files* to the user profile with progress reporting."""
     from config import is_test_mode
@@ -270,87 +285,251 @@ def copy_merged_files(
 
     _prevent_sleep()
     try:
-        res = _do_copy(files, progress_cb, cancel_event, retry_cfg)
+        res = _do_copy(files, progress_cb, cancel_event, retry_cfg, cut_mode)
         res.duration_seconds = max(1, int(time.perf_counter() - t0))
         return res
     finally:
         _allow_sleep()
 
 
-def _check_skip_or_conflict(
-    mf: MergedFile, dest: Path, total_bytes: int,
-    copied_bytes: int, progress_cb: ProgressCallback,
-    skipped: list[SkippedFile],
-) -> Optional[int]:
-    """Check if identical or conflict, returning new_bytes if handled."""
-    if dest.exists() and _is_identical(mf.source_path, dest):
-        new_bytes = copied_bytes + mf.size_bytes
-        progress_cb(new_bytes, total_bytes, mf.relative_name)
-        return new_bytes
-    if _is_conflict(dest):
-        skipped.append(SkippedFile(
-            source=mf.source_path, dest=dest,
-            reason="já existia no destino com conteúdo diferente",
+def _delete_source_file(path: Path) -> None:
+    """Safely delete a source file, clearing read-only attributes if necessary."""
+    import stat
+    try:
+        path.chmod(stat.S_IWRITE)
+    except OSError:
+        pass
+    try:
+        path.unlink()
+    except OSError as e:
+        logger.error('{"event":"delete_source_failed","path":"%s","error":"%s"}', path, e)
+
+
+def _copy_via_helper_with_retry(
+    source: Path, dest: Path, retry_cfg: CopyRetryConfig, cut_mode: bool = False,
+) -> tuple[bool, str]:
+    """Retry an elevated-helper copy with the same exponential backoff as
+    _try_copy_with_retry, so a transient IPC hiccup (e.g. the helper's pipe
+    being briefly busy) doesn't count as a permanent failure on the first try.
+    """
+    from services.elevation import copy_via_helper
+    last_error = ""
+    for attempt in range(retry_cfg.max_retries + 1):
+        ok, err = copy_via_helper(source, dest, cut_mode)
+        if ok:
+            return True, ""
+        last_error = err
+        if attempt < retry_cfg.max_retries:
+            time.sleep(retry_cfg.backoff_base * (2 ** attempt))
+    return False, last_error
+
+
+def _mark_remaining_as_failed(remaining: list[MergedFile], failed: list[SkippedFile]) -> None:
+    """Record files never attempted after an early abort, so the restore
+    summary always accounts for every file instead of some silently vanishing.
+    """
+    for mf in remaining:
+        dest = resolve_dest_path(mf.dest_folder, mf.relative_name, getattr(mf, "target_profile", None))
+        failed.append(SkippedFile(
+            mf.source_path, dest,
+            "Não processado — operação interrompida após falhas consecutivas",
         ))
-        new_bytes = copied_bytes + mf.size_bytes
-        progress_cb(new_bytes, total_bytes, mf.relative_name)
-        return new_bytes
+
+
+# One of "copied" (actually written), "neutral" (identical/conflict — not a
+# failure, but doesn't count toward files_copied either), or "failed".
+_FileOutcome = str
+
+
+def _check_skip_or_conflict(
+    mf: MergedFile, dest: Path, cut_mode: bool,
+    skipped: list[SkippedFile], skipped_lock: threading.Lock,
+) -> Optional[tuple[_FileOutcome, int]]:
+    """Return a ("neutral", 0) outcome if *dest* is already identical or a
+    genuine conflict, else None to signal the caller should actually copy.
+    """
+    if dest.exists() and _is_identical(mf.source_path, dest):
+        if cut_mode:
+            _delete_source_file(mf.source_path)
+        return "neutral", 0
+
+    if _is_conflict(dest):
+        with skipped_lock:
+            skipped.append(SkippedFile(
+                source=mf.source_path, dest=dest,
+                reason="já existia no destino com conteúdo diferente",
+            ))
+        return "neutral", 0
     return None
 
 
-def _copy_file_step(
-    mf: MergedFile, total_bytes: int, copied_bytes: int,
-    progress_cb: ProgressCallback, retry_cfg: CopyRetryConfig,
-    skipped: list[SkippedFile], failed: list[SkippedFile],
-    cancel_event: Event,
-) -> tuple[int, bool, bool]:
-    """Copy one file, returning (new_bytes, actual_written, reset_fails, inc_fails)."""
-    dest = resolve_dest_path(mf.dest_folder, mf.relative_name, getattr(mf, "target_profile", None))
-    res = _check_skip_or_conflict(mf, dest, total_bytes, copied_bytes, progress_cb, skipped)
-    if res is not None:
-        return res, 0, False, False
-    progress_cb(copied_bytes, total_bytes, mf.relative_name)
-    tr = FileProgressTracker(progress_cb, total_bytes, mf.relative_name, copied_bytes)
-    ok, wr, err = _try_copy_with_retry(mf.source_path, dest, retry_cfg, tr, cancel_event)
+def _copy_elevated(
+    mf: MergedFile, dest: Path, retry_cfg: CopyRetryConfig, cut_mode: bool,
+    failed: list[SkippedFile], failed_lock: threading.Lock,
+) -> tuple[_FileOutcome, int]:
+    """Write via the elevated helper — dest is under another user's profile."""
+    ok, err = _copy_via_helper_with_retry(mf.source_path, dest, retry_cfg, cut_mode)
     if ok:
-        return copied_bytes + wr, wr, True, False
-    failed.append(SkippedFile(mf.source_path, dest, err))
-    return copied_bytes + mf.size_bytes, 0, False, True
+        return "copied", mf.size_bytes
+    with failed_lock:
+        failed.append(SkippedFile(mf.source_path, dest, err))
+    return "failed", 0
+
+
+def _rename_for_cut_mode(source: Path, dest: Path) -> bool:
+    """Try to move *source* to *dest* via a metadata-only rename (<1ms on the
+    same drive) instead of a full copy-then-delete. Returns False (falls back
+    to a regular copy) on any OSError, e.g. a cross-device move.
+    """
+    import stat
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            try:
+                dest.chmod(stat.S_IWRITE)
+            except OSError:
+                pass
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+        os.rename(source, dest)
+        return True
+    except OSError as rename_exc:
+        logger.warning('{"event":"rename_failed","source":"%s","dest":"%s","error":"%s"}', source, dest, rename_exc)
+        return False
+
+
+def _copy_local(
+    mf: MergedFile, dest: Path, retry_cfg: CopyRetryConfig,
+    cancel_event: Event, cut_mode: bool,
+    failed: list[SkippedFile], failed_lock: threading.Lock,
+) -> tuple[_FileOutcome, int]:
+    """Write directly to *dest* (no elevation needed) with retry-with-backoff."""
+    ok, wr, err = _try_copy_with_retry(mf.source_path, dest, retry_cfg, None, cancel_event)
+    if ok:
+        if cut_mode:
+            _delete_source_file(mf.source_path)
+        return "copied", wr
+    with failed_lock:
+        failed.append(SkippedFile(mf.source_path, dest, err))
+    return "failed", 0
+
+
+def _copy_one_file(
+    mf: MergedFile, retry_cfg: CopyRetryConfig,
+    skipped: list[SkippedFile], skipped_lock: threading.Lock,
+    failed: list[SkippedFile], failed_lock: threading.Lock,
+    cancel_event: Event, cut_mode: bool,
+) -> tuple[_FileOutcome, int]:
+    """Copy a single file end to end: skip/conflict check, elevated-profile
+    routing, cut_mode rename, retry-with-backoff. Returns (outcome, bytes
+    actually written). Safe to call from multiple threads concurrently —
+    *skipped*/*failed* are shared lists, each guarded by its own lock; all
+    other state here is local to this call.
+    """
+    dest = resolve_dest_path(mf.dest_folder, mf.relative_name, getattr(mf, "target_profile", None))
+
+    skip_result = _check_skip_or_conflict(mf, dest, cut_mode, skipped, skipped_lock)
+    if skip_result is not None:
+        return skip_result
+
+    if _needs_elevated_write(dest):
+        return _copy_elevated(mf, dest, retry_cfg, cut_mode, failed, failed_lock)
+
+    if cut_mode and _rename_for_cut_mode(mf.source_path, dest):
+        return "copied", mf.size_bytes
+
+    return _copy_local(mf, dest, retry_cfg, cancel_event, cut_mode, failed, failed_lock)
+
+
+class _CopyAggregator:
+    """Thread-safe running totals + consecutive-failure circuit breaker for
+    the concurrent copy loop. Each file's outcome is applied atomically —
+    "neutral" (identical/conflict) advances the byte total without touching
+    files_copied or the failure streak; "copied" resets the streak; "failed"
+    extends it and trips `aborted` once the configured limit is reached.
+    """
+
+    def __init__(self, total_bytes: int, progress_cb: ProgressCallback, consecutive_fail_limit: int) -> None:
+        self._lock = threading.Lock()
+        self._progress_cb = progress_cb
+        self._consecutive_fail_limit = consecutive_fail_limit
+        self._consecutive_fails = 0
+        self.total_bytes = total_bytes
+        self.copied_bytes = 0
+        self.actual_bytes = 0
+        self.copied_count = 0
+        self.aborted = False
+
+    def record(self, filename: str, size_bytes: int, actual_written: int, outcome: _FileOutcome) -> None:
+        with self._lock:
+            self.copied_bytes += size_bytes
+            self.actual_bytes += actual_written
+            if outcome == "copied":
+                self.copied_count += 1
+                self._consecutive_fails = 0
+            elif outcome == "failed":
+                self._consecutive_fails += 1
+                if self._consecutive_fails >= self._consecutive_fail_limit:
+                    self.aborted = True
+            self._progress_cb(self.copied_bytes, self.total_bytes, filename)
 
 
 def _process_copy_loop(
     files: list[MergedFile], tot_bytes: int, progress_cb: ProgressCallback,
     cancel_event: Event, retry_cfg: CopyRetryConfig,
     skipped: list[SkippedFile], failed: list[SkippedFile],
+    cut_mode: bool = False,
 ) -> tuple[int, int, int, bool]:
-    """Run copy loop, returning (copied_bytes, actual_bytes, copied_count, aborted)."""
-    copied_bytes, actual_bytes, copied_count, consecutive_fails = 0, 0, 0, 0
-    for mf in files:
-        if cancel_event.is_set():
-            return copied_bytes, actual_bytes, copied_count, True
-        copied_bytes, wr, reset_f, inc_f = _copy_file_step(
-            mf, tot_bytes, copied_bytes, progress_cb, retry_cfg, skipped, failed, cancel_event
+    """Run the copy loop over a small thread pool — files are independent of
+    each other, so copying several at once hides per-file overhead (syscalls,
+    elevated-helper IPC round trips) that dominates over many small files.
+    Returns (copied_bytes, actual_bytes, copied_count, aborted).
+    """
+    aggregator = _CopyAggregator(tot_bytes, progress_cb, retry_cfg.consecutive_fail_limit)
+    skipped_lock = threading.Lock()
+    failed_lock = threading.Lock()
+
+    def run_one(mf: MergedFile) -> None:
+        outcome, written = _copy_one_file(
+            mf, retry_cfg, skipped, skipped_lock, failed, failed_lock, cancel_event, cut_mode,
         )
-        consecutive_fails = 0 if reset_f else (consecutive_fails + 1 if inc_f else consecutive_fails)
-        actual_bytes += wr
-        if reset_f:
-            copied_count += 1
-        if consecutive_fails >= retry_cfg.consecutive_fail_limit:
-            logger.error('{"event":"copy_abort","consecutive_fails":%d}', consecutive_fails)
-            return copied_bytes, actual_bytes, copied_count, True
-    return copied_bytes, actual_bytes, copied_count, False
+        aggregator.record(mf.relative_name, mf.size_bytes, written, outcome)
+
+    submitted = 0
+    with ThreadPoolExecutor(max_workers=COPY_WORKERS) as executor:
+        pending: dict = {}
+        for mf in files:
+            if cancel_event.is_set() or aggregator.aborted:
+                break
+            pending[executor.submit(run_one, mf)] = mf
+            submitted += 1
+            if len(pending) >= COPY_WORKERS:
+                done, _ = wait(pending.keys(), return_when=FIRST_COMPLETED)
+                for f in done:
+                    pending.pop(f, None)
+        wait(pending.keys())
+
+    if cancel_event.is_set() or aggregator.aborted:
+        if aggregator.aborted:
+            logger.error('{"event":"copy_abort"}')
+        _mark_remaining_as_failed(files[submitted:], failed)
+        return aggregator.copied_bytes, aggregator.actual_bytes, aggregator.copied_count, True
+    return aggregator.copied_bytes, aggregator.actual_bytes, aggregator.copied_count, False
 
 
 def _do_copy(
     files: list[MergedFile], progress_cb: ProgressCallback,
     cancel_event: Event, retry_cfg: CopyRetryConfig,
+    cut_mode: bool = False,
 ) -> CopyResult:
     """Inner copy loop — separated so sleep flag is always released."""
     tot_bytes = sum(f.size_bytes for f in files)
     skipped: list[SkippedFile] = []
     failed: list[SkippedFile] = []
     copied_bytes, actual_bytes, copied_count, aborted = _process_copy_loop(
-        files, tot_bytes, progress_cb, cancel_event, retry_cfg, skipped, failed
+        files, tot_bytes, progress_cb, cancel_event, retry_cfg, skipped, failed, cut_mode
     )
     if aborted and not cancel_event.is_set():
         return CopyResult(False, copied_count, actual_bytes, skipped, failed, False)
@@ -358,7 +537,7 @@ def _do_copy(
         return CopyResult(False, copied_count, actual_bytes, skipped, failed, True)
     if failed:
         copied_count, copied_bytes, actual_bytes = _retry_failed_files(
-            failed, progress_cb, retry_cfg, cancel_event, copied_count, copied_bytes, actual_bytes, tot_bytes
+            failed, progress_cb, retry_cfg, cancel_event, copied_count, copied_bytes, actual_bytes, tot_bytes, cut_mode
         )
     return CopyResult(True, copied_count, actual_bytes, skipped, failed, False)
 
@@ -374,6 +553,11 @@ def _retry_single_failed_file(
     except OSError:
         file_size = 0
     base_bytes = copied_bytes - file_size
+    if _needs_elevated_write(sf.dest):
+        ok, err = _copy_via_helper_with_retry(sf.source, sf.dest, retry_cfg)
+        new_bytes = base_bytes + file_size if ok else copied_bytes
+        progress_cb(new_bytes, total_bytes, sf.source.name)
+        return ok, new_bytes, err
     tr = FileProgressTracker(progress_cb, total_bytes, sf.source.name, base_bytes)
     ok, w, err = _try_copy_with_retry(sf.source, sf.dest, retry_cfg, tr, cancel_event)
     new_bytes = base_bytes + w if ok else copied_bytes
@@ -384,6 +568,7 @@ def _retry_failed_files(
     failed: list[SkippedFile], progress_cb: ProgressCallback,
     retry_cfg: CopyRetryConfig, cancel_event: Event,
     copied_count: int, copied_bytes: int, actual_bytes: int, total_bytes: int,
+    cut_mode: bool = False,
 ) -> tuple[int, int, int]:
     """Retry previously failed files once more."""
     for sf in list(failed):
@@ -393,6 +578,8 @@ def _retry_failed_files(
             sf, progress_cb, retry_cfg, copied_bytes, total_bytes, cancel_event
         )
         if ok:
+            if cut_mode:
+                _delete_source_file(sf.source)
             try:
                 file_size = sf.source.stat().st_size
             except OSError:
@@ -447,61 +634,3 @@ def _relative_to_profile(dest_path: Path) -> Path:
         return dest_path.relative_to(home)
     except ValueError:
         return Path(dest_path.name)
-
-
-
-
-
-def _do_write_benchmark(test_file: Path) -> int:
-    """Perform actual write speed test, returning bytes per second."""
-    block_count = BENCHMARK_FILE_BYTES // BENCHMARK_BLOCK_BYTES
-    data = b"A" * BENCHMARK_BLOCK_BYTES
-    with open(test_file, "wb") as f:
-        t0 = time.perf_counter()
-        for _ in range(block_count):
-            f.write(data)
-        dur = max(0.001, time.perf_counter() - t0)
-    return int(BENCHMARK_FILE_BYTES / dur)
-
-
-def run_write_benchmark(target_dir: Path) -> int:
-    """Measure disk write speed in target_dir by writing a temporary file.
-
-    Returns speed in bytes/sec. Fallback to 80 MB/s for network, 50 MB/s for local on error.
-    """
-    from config import is_test_mode
-    if is_test_mode():
-        return NETWORK_SPEED_FALLBACK_BPS
-    is_net = target_dir.drive.startswith("\\\\") or target_dir.as_posix().startswith("//")
-    fallback = NETWORK_SPEED_FALLBACK_BPS if is_net else LOCAL_SPEED_FALLBACK_BPS
-    test_file = target_dir / f".remos_speedtest_{int(time.time())}"
-    logger.debug('{"event":"benchmark_start","path":"%s"}', test_file)
-    try:
-        speed = _do_write_benchmark(test_file)
-        test_file.unlink(missing_ok=True)
-        logger.info('{"event":"benchmark_success","path":"%s","speed":%d}', test_file, speed)
-        return speed
-    except OSError as exc:
-        logger.warning('{"event":"benchmark_failed","path":"%s","error":"%s"}', test_file, exc)
-        return fallback
-
-
-def estimate_copy_seconds_for_files(
-    files: list[MergedFile], write_speed_bps: int,
-    network_speed_bps: Optional[int] = None,
-) -> int:
-    """Calculate total estimated copy time by summing individual file durations.
-
-    Network files are limited by the minimum of local write and network speeds.
-    """
-    total_seconds = 0.0
-    net_speed = network_speed_bps or NETWORK_SPEED_FALLBACK_BPS
-    write_cap = min(write_speed_bps, WRITE_SPEED_CAP_BPS)
-    for mf in files:
-        is_net = (
-            mf.source_path.drive.startswith("\\\\")
-            or mf.source_path.as_posix().startswith("//")
-        )
-        speed = min(write_cap, net_speed) if is_net else write_cap
-        total_seconds += mf.size_bytes / max(1.0, speed)
-    return max(1, int(total_seconds))
