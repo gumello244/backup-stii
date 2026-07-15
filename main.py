@@ -47,6 +47,10 @@ def main() -> None:
     _set_asyncio_policy()
     _install_exception_hook()
 
+    # Start the global async worker thread and send startup telemetry
+    from ui.workers import get_global_worker
+    get_global_worker()
+
     app = _init_qapp()
     from ui.main_window import MainWindow
     window = MainWindow()
