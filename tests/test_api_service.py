@@ -26,7 +26,7 @@ class TestApiService(unittest.IsolatedAsyncioTestCase):
 
             mock_post.assert_called_once()
             args, kwargs = mock_post.call_args
-            self.assertIn("/logevent", args[0])
+            self.assertIn("/event", args[0])
 
             payload = kwargs["json"]
             self.assertEqual(payload["event"], "APP_STARTUP")

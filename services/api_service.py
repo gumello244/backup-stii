@@ -93,7 +93,7 @@ class ApiService:
         }
         try:
             resp = await self._client.post(
-                f"{self._base_url}/logevent", json=payload,
+                f"{self._base_url}/event", json=payload,
             )
             resp.raise_for_status()
         except Exception as exc:
