@@ -32,6 +32,8 @@ class TestApiService(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["event"], "APP_STARTUP")
             self.assertEqual(payload["status"], "SUCCESS")
             self.assertEqual(payload["details"]["version"], "2.0.0")
+            self.assertIn("user_login", payload)
+            self.assertIn("user_name", payload)
 
     async def test_report_shutdown(self) -> None:
         """Verify shutdown event formatting."""

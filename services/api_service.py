@@ -58,6 +58,14 @@ class ApiService:
         """Current Windows login name."""
         return os.environ.get("USERNAME", "Unknown")
 
+    def _get_user_name(self) -> str:
+        """Current Windows display name / full name."""
+        try:
+            import win32api
+            return win32api.GetUserNameEx(win32api.NameDisplay)
+        except Exception:
+            return self._get_user_login()
+
     def _get_local_ip(self) -> str:
         """Best-effort local IPv4 address."""
         try:
@@ -89,6 +97,7 @@ class ApiService:
             "status": status,
             "details": payload_details,
             "user_login": self._get_user_login(),
+            "user_name": self._get_user_name(),
             "device_ip": self._get_local_ip(),
         }
         try:
