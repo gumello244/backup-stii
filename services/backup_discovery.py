@@ -41,6 +41,8 @@ class BackupSource:
     machine_id: str
     total_bytes: int
     folder_list: list[str] = field(default_factory=list)
+    modified_time: float = 0.0
+
 
 
 def detect_user_login() -> str:
@@ -71,25 +73,29 @@ def extract_machine_id(hostname: str) -> str:
     return ""
 
 
-def _calculate_dir_bytes(root: Path) -> int:
-    """Sum file sizes recursively under *root*, ignoring system files.
+def _calculate_dir_stats(root: Path) -> tuple[int, float]:
+    """Sum file sizes and find max modification time recursively under *root*, ignoring system files.
 
     Example:
-        total = _calculate_dir_bytes(Path("C:/"))
+        total, newest = _calculate_dir_stats(Path("C:/"))
     """
     total = 0
+    max_mtime = 0.0
     try:
         for entry in root.rglob("*"):
             if entry.is_file() and entry.name.lower() not in {
                 "desktop.ini", "thumbs.db", ".ds_store"
             }:
                 try:
-                    total += entry.stat().st_size
+                    stat = entry.stat()
+                    total += stat.st_size
+                    if stat.st_mtime > max_mtime:
+                        max_mtime = stat.st_mtime
                 except OSError:
                     pass
     except OSError:
         pass
-    return total
+    return total, max_mtime
 
 
 def _list_subfolders(user_path: Path) -> list[str]:
@@ -112,13 +118,19 @@ def _build_source(user_path: Path, origin: str, machine_id: str) -> BackupSource
     Example:
         src = _build_source(Path("C:/"), "local", "PMC_12345")
     """
-    total = _calculate_dir_bytes(user_path)
+    total, max_m = _calculate_dir_stats(user_path)
+    if max_m == 0.0:
+        max_m = _safe_mtime(user_path)
     folders = _list_subfolders(user_path)
 
     try:
         raiz_path = user_path.parent.parent / "RAIZ"
         if raiz_path.is_dir():
-            total += _calculate_dir_bytes(raiz_path)
+            r_total, r_max_m = _calculate_dir_stats(raiz_path)
+            total += r_total
+            if r_max_m == 0.0:
+                r_max_m = _safe_mtime(raiz_path)
+            max_m = max(max_m, r_max_m)
             folders.append("RAIZ")
     except (OSError, ValueError):
         pass
@@ -129,6 +141,7 @@ def _build_source(user_path: Path, origin: str, machine_id: str) -> BackupSource
         machine_id=machine_id,
         total_bytes=total,
         folder_list=folders,
+        modified_time=max_m,
     )
 
 

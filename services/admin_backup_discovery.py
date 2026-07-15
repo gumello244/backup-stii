@@ -71,6 +71,7 @@ class RaizDetail:
     file_count: int
     dir_count: int
     path: Path
+    modified_time: float = 0.0
 
 
 @dataclass
@@ -91,8 +92,8 @@ def _is_running_under_test_runner() -> bool:
     return "unittest" in sys.modules or "pytest" in sys.modules
 
 
-def _walk_stats_recursive(path: str | Path) -> tuple[int, int, int]:
-    total_bytes, file_count, dir_count = 0, 0, 0
+def _walk_stats_recursive(path: str | Path) -> tuple[int, int, int, float]:
+    total_bytes, file_count, dir_count, max_mtime = 0, 0, 0, 0.0
     try:
         with os.scandir(path) as it:
             for entry in it:
@@ -103,18 +104,21 @@ def _walk_stats_recursive(path: str | Path) -> tuple[int, int, int]:
                 if entry.is_file():
                     file_count += 1
                     try:
-                        total_bytes += entry.stat(follow_symlinks=False).st_size
+                        stat = entry.stat(follow_symlinks=False)
+                        total_bytes += stat.st_size
+                        max_mtime = max(max_mtime, stat.st_mtime)
                     except OSError:
                         pass
                 elif entry.is_dir(follow_symlinks=False):
                     dir_count += 1
-                    sub_bytes, sub_files, sub_dirs = _walk_stats_recursive(entry.path)
+                    sub_bytes, sub_files, sub_dirs, sub_mtime = _walk_stats_recursive(entry.path)
                     total_bytes += sub_bytes
                     file_count += sub_files
                     dir_count += sub_dirs
+                    max_mtime = max(max_mtime, sub_mtime)
     except OSError:
         pass
-    return total_bytes, file_count, dir_count
+    return total_bytes, file_count, dir_count, max_mtime
 
 
 def _walk_profile_stats_recursive(path: str | Path, start_mtime: float) -> tuple[int, int, float]:
@@ -253,17 +257,20 @@ def get_raiz_detail(raiz_path: Path) -> Optional[RaizDetail]:
     files (e.g. only empty subfolders) — there would be nothing to restore."""
     if not raiz_path.is_dir():
         return None
-    bytes_sz, files, dirs = _walk_stats_recursive(raiz_path)
+    bytes_sz, files, dirs, max_m = _walk_stats_recursive(raiz_path)
     if files == 0:
         return None
-    return RaizDetail(size_bytes=bytes_sz, file_count=files, dir_count=dirs, path=raiz_path)
+    if max_m == 0.0:
+        max_m = _safe_mtime(raiz_path)
+    return RaizDetail(size_bytes=bytes_sz, file_count=files, dir_count=dirs, path=raiz_path, modified_time=max_m)
 
 
 def get_profile_detail(user_path: Path) -> UserProfileDetail:
     """Calculate stats for a single user profile."""
     name = user_path.name
-    mtime = _safe_mtime(user_path)
-    total_bytes, file_count, mtime = _walk_profile_stats_recursive(user_path, mtime)
+    total_bytes, file_count, mtime = _walk_profile_stats_recursive(user_path, 0.0)
+    if mtime == 0.0:
+        mtime = _safe_mtime(user_path)
     return UserProfileDetail(
         name=name, size_bytes=total_bytes, modified_time=mtime, path=user_path, file_count=file_count,
     )

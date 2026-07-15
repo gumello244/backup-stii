@@ -7,7 +7,7 @@ from pathlib import Path
 from services.backup_discovery import (
     detect_user_login,
     extract_machine_id,
-    _calculate_dir_bytes,
+    _calculate_dir_stats,
     _list_subfolders,
     _extract_id_from_folder,
     scan_network_source,
@@ -147,18 +147,20 @@ class TestBackupDiscovery(unittest.TestCase):
         """Test current login extraction."""
         self.assertEqual(detect_user_login(), "14029")
 
-    def test_calculate_dir_bytes(self) -> None:
-        """Test directory bytes calculation ignoring system files."""
+    def test_calculate_dir_stats(self) -> None:
+        """Test directory stats calculation ignoring system files."""
         structure = {
-            "root/file1.txt": {"size": 100},
-            "root/file2.txt": {"size": 250},
-            "root/desktop.ini": {"size": 84},
-            "root/Thumbs.db": {"size": 12000},
-            "root/subdir/.DS_Store": {"size": 4096},
-            "root/subdir/file3.txt": {"size": 50},
+            "root/file1.txt": {"size": 100, "mtime": 10.0},
+            "root/file2.txt": {"size": 250, "mtime": 20.0},
+            "root/desktop.ini": {"size": 84, "mtime": 30.0},
+            "root/Thumbs.db": {"size": 12000, "mtime": 40.0},
+            "root/subdir/.DS_Store": {"size": 4096, "mtime": 50.0},
+            "root/subdir/file3.txt": {"size": 50, "mtime": 15.0},
         }
         root = FakePath("root", structure)
-        self.assertEqual(_calculate_dir_bytes(root), 400)
+        total_bytes, max_mtime = _calculate_dir_stats(root)
+        self.assertEqual(total_bytes, 400)
+        self.assertEqual(max_mtime, 20.0)
 
     def test_list_subfolders(self) -> None:
         """Test listing subfolders."""

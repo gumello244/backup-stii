@@ -46,14 +46,19 @@ def _source_sort_key(src: AdminBackupSource) -> float:
     """Return newest modified time for sorting (newest-first)."""
     times = [p.modified_time for p in src.profiles if p.modified_time > 0]
     if src.raiz:
+        raiz_time = getattr(src.raiz, "modified_time", 0.0)
+        if raiz_time > 0:
+            times.append(raiz_time)
+        else:
+            try:
+                times.append(src.raiz.path.stat().st_mtime)
+            except OSError:
+                pass
+    if not times:
         try:
-            times.append(src.raiz.path.stat().st_mtime)
+            times.append(src.path.stat().st_mtime)
         except OSError:
             pass
-    try:
-        times.append(src.path.stat().st_mtime)
-    except OSError:
-        pass
     return max(times, default=0.0)
 
 

@@ -208,38 +208,20 @@ def merge_sources(sources: list[BackupSource], admin_mode: bool = False) -> Merg
     if not sources:
         return MergedFileSet(files=[], total_bytes=0, source_summary="Nenhuma")
 
+    if not admin_mode and len(sources) > 1:
+        newest_source = max(sources, key=lambda s: s.modified_time)
+        sources = [newest_source]
+
     from concurrent.futures import ThreadPoolExecutor
     from config import MAX_CONCURRENT_DISCOVERY_TASKS
 
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_DISCOVERY_TASKS) as executor:
         indexes = list(executor.map(_index_source, sources))
 
-    if not admin_mode and len(sources) > 1:
-        sources, indexes = _filter_newest_source_only(sources, indexes)
-
     merged_index = _merge_indexes(*indexes)
     files = _build_merged_files(merged_index)
     files = filter_contacts_folder(files)
     return _build_file_set_result(files, sources)
-
-
-def _filter_newest_source_only(
-    sources: list[BackupSource],
-    indexes: list[dict[_IndexKey, _FileEntry]],
-) -> tuple[list[BackupSource], list[dict[_IndexKey, _FileEntry]]]:
-    """Find and return only the source (and its index) with the newest file modification time.
-
-    Example:
-        s, idx = _filter_newest_source_only(sources, indexes)
-    """
-    selected_idx = 0
-    max_mtime = -1.0
-    for i, idx in enumerate(indexes):
-        newest_mtime = max((entry.modified_time for entry in idx.values()), default=0.0)
-        if newest_mtime > max_mtime:
-            max_mtime = newest_mtime
-            selected_idx = i
-    return [sources[selected_idx]], [indexes[selected_idx]]
 
 
 

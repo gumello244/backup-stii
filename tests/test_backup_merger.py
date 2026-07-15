@@ -173,14 +173,16 @@ class TestBackupMerger(unittest.TestCase):
             origin="local",
             machine_id="PMC_1",
             total_bytes=10,
-            folder_list=["Desktop"]
+            folder_list=["Desktop"],
+            modified_time=1.0
         )
         s2 = BackupSource(
             path=FakePath("s2", fs2),  # type: ignore
             origin="network",
             machine_id="PMC_1",
             total_bytes=20,
-            folder_list=["Desktop"]
+            folder_list=["Desktop"],
+            modified_time=2.0
         )
         res = merge_sources([s1, s2], admin_mode=False)
         self.assertEqual(len(res.files), 1)
@@ -196,14 +198,16 @@ class TestBackupMerger(unittest.TestCase):
             origin="local",
             machine_id="PMC_1",
             total_bytes=10,
-            folder_list=["Desktop"]
+            folder_list=["Desktop"],
+            modified_time=1.0
         )
         s2 = BackupSource(
             path=FakePath("s2", fs2),  # type: ignore
             origin="network",
             machine_id="PMC_1",
             total_bytes=20,
-            folder_list=["Desktop"]
+            folder_list=["Desktop"],
+            modified_time=2.0
         )
         res = merge_sources([s1, s2], admin_mode=True)
         self.assertEqual(len(res.files), 2)

@@ -27,8 +27,8 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-.agents
-.claude
+.agents/
+.claude/
 refs/
 
 # PyInstaller
