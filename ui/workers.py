@@ -142,6 +142,16 @@ class ThreadedWorker(QThread):
     error = pyqtSignal(str)
 
 
+def _report_worker_failure(event: str, error: str) -> None:
+    """Forward a worker-thread exception to telemetry.
+
+    Deferred import: ui.telemetry imports get_global_worker from this
+    module, so importing it back at module scope here would be circular.
+    """
+    from ui.telemetry import report_failure
+    report_failure(event, error)
+
+
 # =====================================================================
 # Task-specific workers
 # =====================================================================
@@ -181,6 +191,7 @@ class DiscoverSourcesWorker(ThreadedWorker):
             self.finished.emit(sources)
         except Exception as exc:
             logger.error('{"event":"discover_error","error":"%s"}', exc)
+            _report_worker_failure("DISCOVERY_FAILED", str(exc))
             self.error.emit(str(exc))
             self.finished.emit([])
 
@@ -222,6 +233,7 @@ class AdminDiscoverSourcesWorker(ThreadedWorker):
                 self.source_found.emit(src)
         except Exception as exc:
             logger.error('{"event":"admin_discover_error","error":"%s"}', exc)
+            _report_worker_failure("ADMIN_DISCOVERY_FAILED", str(exc))
             self.error.emit(str(exc))
         finally:
             self.finished.emit()
@@ -249,6 +261,7 @@ class MergeSourcesWorker(ThreadedWorker):
             self.finished.emit(result)
         except Exception as exc:
             logger.error('{"event":"merge_error","error":"%s"}', exc)
+            _report_worker_failure("MERGE_FAILED", str(exc))
             self.error.emit(str(exc))
             from services.backup_merger import MergedFileSet
             self.finished.emit(
@@ -294,6 +307,7 @@ class CopyFilesWorker(ThreadedWorker):
             self.finished.emit(result)
         except Exception as exc:
             logger.error('{"event":"copy_error","error":"%s"}', exc)
+            _report_worker_failure("RESTORE_CRASHED", str(exc))
             self.error.emit(str(exc))
             self.finished.emit(CopyResult(
                 success=False, files_copied=0, bytes_copied=0,
@@ -333,6 +347,9 @@ class CopySkippedWorker(ThreadedWorker):
             ok, msg = copy_skipped_to_desktop(self._skipped)
             self.finished.emit(ok, msg)
         except Exception as exc:
+            # finished(False, ...) already reaches MainWindow._report_copy_skipped_result,
+            # which reports COPY_SKIPPED_TO_DESKTOP as a failure — reporting it here too
+            # would double-count the same failure under the same event name.
             logger.error('{"event":"copy_skipped_error","error":"%s"}', exc)
             self.finished.emit(False, str(exc))
 
@@ -375,6 +392,7 @@ class AdminHelperWorker(ThreadedWorker):
             self.finished.emit(ensure_helper_started())
         except Exception as exc:
             logger.error('{"event":"admin_helper_worker_error","error":"%s"}', exc)
+            _report_worker_failure("ADMIN_HELPER_FAILED", str(exc))
             self.finished.emit(False)
 
 
@@ -395,6 +413,7 @@ class AdminPrepareRestoreWorker(ThreadedWorker):
             self.finished.emit(files)
         except Exception as exc:
             logger.error('{"event":"prepare_restore_error","error":"%s"}', exc)
+            _report_worker_failure("ADMIN_PREPARE_RESTORE_FAILED", str(exc))
             self.error.emit(str(exc))
             self.finished.emit([])
 
@@ -423,5 +442,6 @@ class AdminSourceDetailRunnable(QRunnable):
             self.signals.finished.emit(detailed)
         except Exception as exc:
             logger.error('{"event":"source_detail_error","error":"%s"}', exc)
+            _report_worker_failure("ADMIN_SOURCE_DETAIL_FAILED", str(exc))
             self.signals.error.emit(str(exc))
             self.signals.finished.emit(self.source)

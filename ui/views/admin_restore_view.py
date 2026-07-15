@@ -27,6 +27,7 @@ from PyQt5.QtWidgets import (
 from ui.assets import RM_TEXT_MUTED, RM_BORDER, RM_SURFACE
 from ui.components import BentoSpinner
 from ui.workers import AdminDiscoverSourcesWorker, AdminPrepareRestoreWorker, AdminSourceDetailRunnable
+from ui.telemetry import report_success, report_failure
 from ui.views.admin_restore_cards import SourceCard, RaizDetailCard, ProfileRow, SkeletonCard
 from services.admin_backup_discovery import AdminBackupSource, UserProfileDetail, PENDING_STATS
 from services.backup_discovery import extract_machine_id, detect_user_login
@@ -533,6 +534,7 @@ class AdminRestoreView(QWidget):
     def _on_discovery_finished(self) -> None:
         self._clear_skeletons()
         self._header_spinner.setVisible(False)
+        self._report_search_result()
         if self.sources:
             self._stage_lbl.setVisible(True)
             self._stage_lbl.setText(f"{len(self.sources)} fonte(s) encontrada(s)")
@@ -542,6 +544,17 @@ class AdminRestoreView(QWidget):
             self._spinner.setVisible(False)
             self._set_status("Nenhum backup encontrado. Use a busca abaixo.")
             self._stack.setCurrentIndex(_PAGE_SEARCHING)
+
+    def _report_search_result(self) -> None:
+        """Report admin search outcome — zero results is a real failure funnel step."""
+        details = {
+            "result_count": len(self.sources),
+            "has_query": bool(self._current_query),
+        }
+        if self.sources:
+            report_success("ADMIN_SEARCH", details)
+        else:
+            report_failure("ADMIN_SEARCH", "no results", details)
 
     def _on_search_clicked(self) -> None:
         if self._is_processing():
@@ -759,9 +772,20 @@ class AdminRestoreView(QWidget):
             source_summary=summary,
         )
 
+        self._report_prepare_result(files, total)
+
         win = self.window()
         if hasattr(win, "_state"):
             win._state.merged = merged
             win._state.sources = [self._processing_source]
 
         self.next_requested.emit()
+
+    def _report_prepare_result(self, files: list, total_bytes: int) -> None:
+        """Report scope by count, not name — profile names may identify other users."""
+        report_success("ADMIN_RESTORE_PREPARED", {
+            "file_count": len(files),
+            "total_bytes": total_bytes,
+            "raiz_selected": self._processing_raiz_sel,
+            "profile_count": len(self._processing_sel_profiles),
+        })

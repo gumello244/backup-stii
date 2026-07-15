@@ -23,6 +23,7 @@ from services.backup_discovery import BackupSource
 from services.backup_merger import MergedFile, MergedFileSet, filter_files_by_selection
 from ui.assets import STYLESHEET, asset_path
 from ui.fade_stack import FadeStackWidget
+from ui.telemetry import report_success, report_failure
 from ui.views.welcome_view import WelcomeView
 from ui.views.analysis_view import AnalysisView
 from ui.views.confirm_view import ConfirmView
@@ -38,7 +39,6 @@ from ui.workers import (
     CopySkippedWorker,
     BenchmarkWorker,
     AdminHelperWorker,
-    get_global_worker,
 )
 
 logger = logging.getLogger(__name__)
@@ -89,6 +89,7 @@ class MainWindow(QMainWindow):
 
         self._state = SessionState()
         self._workers: list[object] = []  # prevent GC
+        self._skipped_copy_count = 0
 
         self._init_views()
         self._connect_signals()
@@ -180,6 +181,7 @@ class MainWindow(QMainWindow):
         logger.info(
             '{"event":"sources_discovered","count":%d}', len(sources),
         )
+        self._report_discovery_result(sources)
         if self._stack.currentIndex() == _ANALYSIS:
             self._process_sources()
 
@@ -190,6 +192,18 @@ class MainWindow(QMainWindow):
             self._on_discovery_error("error details")
         """
         logger.error('{"event":"discovery_error","error":"%s"}', error)
+
+    def _report_discovery_result(self, sources: list) -> None:
+        """Report discovery outcome — empty result is a real failure funnel step."""
+        if not sources:
+            report_failure("DISCOVERY_EMPTY", "no backup source found")
+            return
+        report_success("DISCOVERY_COMPLETE", {
+            "source_count": len(sources),
+            "network_count": sum(1 for s in sources if s.origin == "network"),
+            "local_count": sum(1 for s in sources if s.origin == "local"),
+            "total_bytes": sum(s.total_bytes for s in sources),
+        })
 
     # ------------------------------------------------------------------
     # Navigation
@@ -318,6 +332,7 @@ class MainWindow(QMainWindow):
         self._state.sources.clear()
         self._state.merged = None
         self._analysis.set_discovering()
+        report_success("DISCOVERY_RETRY")
         self._start_background_discovery()
 
     # ------------------------------------------------------------------
@@ -349,6 +364,7 @@ class MainWindow(QMainWindow):
     def _on_merge_finished(self, merged: MergedFileSet) -> None:
         """Handle merge completion."""
         self._state.merged = merged
+        self._report_merge_result(merged)
         if merged.files:
             self._analysis.set_resolved(merged, self._state.admin_mode)
             is_local = all(s.origin == "local" for s in self._state.sources) if self._state.sources else True
@@ -356,6 +372,16 @@ class MainWindow(QMainWindow):
             self._start_background_benchmarks(merged)
         else:
             self._analysis.set_no_source()
+
+    def _report_merge_result(self, merged: MergedFileSet) -> None:
+        if merged.files:
+            report_success("MERGE_COMPLETE", {
+                "file_count": len(merged.files),
+                "total_bytes": merged.total_bytes,
+                "source_count": len(self._state.sources),
+            })
+        else:
+            report_failure("MERGE_EMPTY", "merge produced no files")
 
     def _start_background_benchmarks(self, merged: MergedFileSet) -> None:
         """Launch background benchmark thread once merge is finished."""
@@ -397,7 +423,7 @@ class MainWindow(QMainWindow):
         self._workers.append(self._copy_worker)
         self._copy_worker.start()
 
-        self._report_restore_start(len(files_to_copy))
+        self._report_restore_start(len(files_to_copy), cut_mode)
 
     def _filter_files_by_folders(
         self, selected_folders: list[str],
@@ -434,8 +460,10 @@ class MainWindow(QMainWindow):
         if not all_skipped:
             return
 
+        self._skipped_copy_count = len(all_skipped)
         worker = CopySkippedWorker(all_skipped)
         worker.finished.connect(self._summary.on_skipped_copy_done)
+        worker.finished.connect(self._report_copy_skipped_result)
         self._workers.append(worker)
         worker.start()
 
@@ -444,39 +472,38 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _report_admin_mode_elevation(self, started_ok: bool) -> None:
-        w = get_global_worker()
-        if not w.api_service:
-            return
         if started_ok:
-            w.submit_task(w.api_service.report_success("ADMIN_MODE_ELEVATION"))
+            report_success("ADMIN_MODE_ELEVATION")
         else:
-            w.submit_task(w.api_service.report_failure(
+            report_failure(
                 "ADMIN_MODE_ELEVATION", "UAC prompt declined or helper failed to start",
-            ))
+            )
 
-    def _report_restore_start(self, file_count: int) -> None:
-        w = get_global_worker()
-        if w.api_service:
-            w.submit_task(w.api_service.report_success(
-                "RESTORE_START", {"file_count": file_count},
-            ))
+    def _report_restore_start(self, file_count: int, cut_mode: bool) -> None:
+        report_success("RESTORE_START", {
+            "file_count": file_count,
+            "admin_mode": self._state.admin_mode,
+            "cut_mode": cut_mode,
+        })
 
     def _report_restore_result(self, result: CopyResult) -> None:
-        w = get_global_worker()
-        if not w.api_service:
-            return
         details = {
             "files_copied": result.files_copied,
             "bytes_copied": result.bytes_copied,
             "skipped_count": len(result.skipped_files),
             "failed_count": len(result.failed_files),
             "cancelled": result.cancelled,
+            "duration_seconds": result.duration_seconds,
+            "admin_mode": self._state.admin_mode,
         }
         if result.success:
-            w.submit_task(w.api_service.report_success(
-                "RESTORE_COMPLETE", details,
-            ))
+            report_success("RESTORE_COMPLETE", details)
         else:
-            w.submit_task(w.api_service.report_failure(
-                "RESTORE_FAILED", "copy failed or cancelled", details,
-            ))
+            report_failure("RESTORE_FAILED", "copy failed or cancelled", details)
+
+    def _report_copy_skipped_result(self, success: bool, _msg: str) -> None:
+        details = {"file_count": self._skipped_copy_count}
+        if success:
+            report_success("COPY_SKIPPED_TO_DESKTOP", details)
+        else:
+            report_failure("COPY_SKIPPED_TO_DESKTOP", "failed to copy skipped files", details)
