@@ -62,10 +62,10 @@ class ProgressView(QWidget):
         layout.setSpacing(14)
 
         # Title
-        title = QLabel("Restaurando arquivos")
-        title.setObjectName("ViewTitle")
-        title.setAlignment(Qt.AlignCenter)
-        layout.addWidget(title)
+        self.title = QLabel("Restaurando arquivos", self)
+        self.title.setObjectName("ViewTitle")
+        self.title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.title)
         layout.addStretch()
 
         # Loading Spinner for initial preparation
@@ -127,6 +127,7 @@ class ProgressView(QWidget):
 
     def reset(self) -> None:
         """Reset to initial state for a fresh copy run."""
+        self.title.setText("Restaurando arquivos")
         self._bar.setValue(0)
         self._percent_label.setText("0%")
         self._eta_lbl.setText("Calculando tempo restante...")

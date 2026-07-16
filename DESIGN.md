@@ -88,3 +88,32 @@ Rounded shapes establish a friendly, state-of-the-art interactive experience:
 - **Surface Cards**: Corner radius of `10px` (`md`).
 - **Action Buttons**: Corner radius of `8px` (`md`).
 - **Progress Bars & Checkboxes**: Corner radius of `6px` (`sm`).
+
+# Interactive Components
+
+Custom interactive elements enforce consistent visual feedback during selection states:
+- **Selection Cards (e.g., `SourceCard`, `LocalSourceCard`)**:
+  - Corner radius of `8px` (`md`).
+  - To prevent visual jumps or layout shifts, the border width remains a constant **`2px`** across both states.
+  - *Default State*: Background `RM_SURFACE` (`#F9F9F9`), border `2px solid RM_BORDER` (`#EEEEEE`), hover background `#EDF2F7`.
+  - *Selected State*: Background `RM_HERO_BG` (`#EBF3FC`), border `2px solid RM_HERO_BORDER` (`#D5E5F7`).
+- **Toggleable Rows (e.g., `ProfileRow`, `FolderOptionWidget`, `LocalFolderOptionWidget`)**:
+  - Corner radius of `6px` (`sm`), height fixed to `36px`.
+  - *Default State*: Background `RM_SURFACE` (`#F9F9F9`), border `1px solid RM_BORDER` (`#EEEEEE`), hover border color `#bbbbbb`.
+  - *Selected/Checked State*: Background `RM_HERO_BG` (`#EBF3FC`), border `2px solid RM_HERO_BORDER` (`#D5E5F7`).
+- **Row Checkboxes & Contained Blank Checkboxes (e.g., `FolderOptionCheckbox`, `DefaultCheckbox`)**:
+  - Styled as blank checkboxes without inline text, achieving the Sonico 2.0 contained checkbox design.
+  - Checkbox widget itself serves as the outer frame of size `18x18px` (containing `2px` border, `2px` padding, white background `#FFFFFF`, and `4px` border-radius).
+  - Internal indicator square is `10x10px` with a `2px` border-radius.
+  - *Checked State*: Accent indicator background `RM_ACCENT` (`#3B6EA5`) fills only the indicator content rect, creating a clear 2px inner padding gap.
+  - *Unchecked State*: Transparent.
+  - Standard options with text (e.g., "Pular mídias e executáveis" and "Recortar arquivos") are refactored into a QHBoxLayout combining a textless contained `QCheckBox` and a clickable `QLabel` to preserve this design.
+- **Bento card sizing**:
+  - Estimation Bento cards are set to a fixed height of **`48px`** (width **`160px`**) in the selection view footer, and a fixed height of **`72px`** (width **`180px`**) in the configuration view center container to prevent value clipping.
+- **Destination path display**:
+  - *Local Mode*: Uses a custom bordered selector button (`1px solid #CBD5E0`, background `#FFFFFF`) that dynamically displays the elided folder path, and embeds a blue `"Modificar"` tag (`1px solid #3B6EA5`, background `#EBF3FC`, text `#3B6EA5`, size `64x20px`) inside the button layout on the right side after selection.
+  - *Network Mode*: Uses a read-only path display styled like the selector button (`1px solid #E2E8F0`, background `#EDF2F7`, text `#718096`) that updates dynamically in real-time as the OS number changes.
+- **Scroll area list spacing**:
+  - Folder details lists omit outer scroll borders (`NoFrame`) and set a `16px` left/right layout margin on the inner container, ensuring rows maintain a safe distance from card borders and vertical scroll bars.
+
+

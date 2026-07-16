@@ -27,7 +27,7 @@ from services.backup_merger import (
 )
 from ui.assets import (
     RM_TEXT_MUTED, RM_HERO_BG, RM_HERO_BORDER,
-    RM_SURFACE, RM_BORDER, RM_GREEN, RM_RED,
+    RM_SURFACE, RM_BORDER, RM_GREEN, RM_RED, RM_ACCENT,
 )
 from ui.components import BentoBox
 from ui.format_utils import format_bytes as _format_bytes, format_time as _format_time
@@ -75,7 +75,7 @@ class FolderOptionWidget(QFrame):
         self.checkbox.setObjectName("FolderOptionCheckbox")
         self.checkbox.setChecked(True)
         self.checkbox.setCursor(Qt.PointingHandCursor)
-        self.checkbox.setFixedWidth(12)
+        self.checkbox.setFixedWidth(18)
         self.checkbox.stateChanged.connect(self.update_style)
 
         self.title_lbl = QLabel(pt_name, self)
@@ -189,23 +189,32 @@ class ConfirmView(QWidget):
         options_title.setObjectName("BentoTitle")
         options_title.setStyleSheet(f"font-size: 10px; font-weight: 800; color: {RM_TEXT_MUTED}; letter-spacing: 1px;")
 
-        self.cut_checkbox = QCheckBox("Recortar arquivos", self._options_card)
+        cut_layout = QHBoxLayout()
+        cut_layout.setContentsMargins(0, 0, 0, 0)
+        cut_layout.setSpacing(8)
+
+        self.cut_checkbox = QCheckBox(self._options_card)
         self.cut_checkbox.setCursor(Qt.PointingHandCursor)
-        self.cut_checkbox.setStyleSheet("""
-            QCheckBox {
-                font-size: 12px;
-                font-weight: 400;
-                color: #4A5568;
-                background: transparent;
-            }
-            QCheckBox::indicator {
-                width: 12px;
-                height: 12px;
-            }
+        self.cut_checkbox.setObjectName("DefaultCheckbox")
+        self.cut_checkbox.setFixedWidth(18)
+
+        cut_label = QLabel("Recortar arquivos", self._options_card)
+        cut_label.setStyleSheet("""
+            font-size: 12px;
+            font-weight: 400;
+            color: #4A5568;
+            background: transparent;
+            border: none;
         """)
+        cut_label.setCursor(Qt.PointingHandCursor)
+        cut_label.mousePressEvent = lambda event: self.cut_checkbox.setChecked(not self.cut_checkbox.isChecked())
+
+        cut_layout.addWidget(self.cut_checkbox)
+        cut_layout.addWidget(cut_label)
+        cut_layout.addStretch()
 
         options_layout.addWidget(options_title)
-        options_layout.addWidget(self.cut_checkbox)
+        options_layout.addLayout(cut_layout)
 
         left_column = QVBoxLayout()
         left_column.setSpacing(8)

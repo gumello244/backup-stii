@@ -430,12 +430,16 @@ def get_local_user_profiles() -> list[str]:
     excluded = {
         "public", "default", "default user", "all users",
         "administrador", "administrator", "system", "networkservice",
-        "localservice", "lello"
+        "localservice", "lello", "usuário padrão", "todos os usuários",
+        "usuario padrao"
     }
     profiles = []
     try:
         for entry in profiles_root.iterdir():
-            if entry.is_dir() and entry.name.lower() not in excluded:
+            if entry.is_dir():
+                name_lower = entry.name.lower()
+                if name_lower in excluded or name_lower.startswith("administrator") or name_lower.startswith("administrador"):
+                    continue
                 profiles.append(entry.name)
     except OSError:
         pass

@@ -243,11 +243,11 @@ QCheckBox {{
     background: transparent;
 }}
 QCheckBox::indicator {{
-    width: 16px;
-    height: 16px;
+    width: 14px;
+    height: 14px;
     border: 2px solid {RM_BORDER};
     border-radius: 4px;
-    background-color: {RM_SURFACE};
+    background-color: #FFFFFF;
 }}
 QCheckBox::indicator:checked {{
     background-color: {RM_ACCENT};
@@ -259,16 +259,13 @@ QCheckBox::indicator:hover {{
 
 /* Checkboxes styled like SONICO 2.0 */
 QCheckBox#DefaultCheckbox {{
-    background-color: #F9F9F9;
-    border: 2px solid #DDDDDD;
-    border-radius: 6px;
-    padding: 6px 10px;
-    spacing: 8px;
-    font-size: 13px;
-    color: {RM_TEXT};
+    background-color: #FFFFFF;
+    border: 2px solid {RM_BORDER};
+    border-radius: 4px;
+    padding: 2px;
 }}
 QCheckBox#DefaultCheckbox:hover {{
-    border-color: #bbbbbb;
+    border-color: #A0AEC0;
 }}
 QCheckBox#DefaultCheckbox::indicator {{
     width: 10px;
@@ -280,16 +277,16 @@ QCheckBox#DefaultCheckbox::indicator {{
 QCheckBox#DefaultCheckbox::indicator:checked {{
     background-color: {RM_ACCENT};
 }}
-QCheckBox#DefaultCheckbox::indicator:hover {{
-    border-color: #bbbbbb;
-}}
 
 
 QCheckBox#FolderOptionCheckbox {{
-    background: transparent;
-    border: none;
-    padding: 0px;
-    margin: 0px;
+    background-color: #FFFFFF;
+    border: 2px solid {RM_BORDER};
+    border-radius: 4px;
+    padding: 2px;
+}}
+QCheckBox#FolderOptionCheckbox:hover {{
+    border-color: #A0AEC0;
 }}
 QCheckBox#FolderOptionCheckbox::indicator {{
     width: 10px;
@@ -300,9 +297,6 @@ QCheckBox#FolderOptionCheckbox::indicator {{
 }}
 QCheckBox#FolderOptionCheckbox::indicator:checked {{
     background-color: {RM_ACCENT};
-}}
-QCheckBox#FolderOptionCheckbox::indicator:hover {{
-    border-color: #bbbbbb;
 }}
 QLabel#FolderTitleLabel {{
     font-size: 13px;

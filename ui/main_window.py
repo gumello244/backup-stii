@@ -32,7 +32,7 @@ from ui.views.summary_view import SummaryView
 from ui.views.about_view import AboutView
 from ui.views.admin_view import AdminView
 from ui.views.admin_restore_view import AdminRestoreView
-from ui.views.admin_create_backup_view import AdminCreateBackupView
+from ui.views.admin_create_backup_view import AdminCreateBackupView, AdminCreateBackupConfigView
 from ui.workers import (
     DiscoverSourcesWorker,
     MergeSourcesWorker,
@@ -42,6 +42,7 @@ from ui.workers import (
     AdminHelperWorker,
     CreateBackupWorker,
 )
+from ui.format_utils import format_bytes as _format_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,7 @@ _ABOUT = 5
 _ADMIN = 6
 _ADMIN_RESTORE = 7
 _ADMIN_CREATE_BACKUP = 8
+_ADMIN_CREATE_BACKUP_CONFIG = 9
 
 
 
@@ -124,6 +126,7 @@ class MainWindow(QMainWindow):
         self._admin = AdminView(self)
         self._admin_restore = AdminRestoreView(self)
         self._admin_create_backup = AdminCreateBackupView(self)
+        self._admin_create_backup_config = AdminCreateBackupConfigView(self)
 
         self._stack.add_view(self._welcome)
         self._stack.add_view(self._analysis)
@@ -134,6 +137,7 @@ class MainWindow(QMainWindow):
         self._stack.add_view(self._admin)
         self._stack.add_view(self._admin_restore)
         self._stack.add_view(self._admin_create_backup)
+        self._stack.add_view(self._admin_create_backup_config)
 
     def _connect_signals(self) -> None:
         """Wire view signals to navigation handlers.
@@ -160,7 +164,9 @@ class MainWindow(QMainWindow):
         self._admin_restore.back_requested.connect(self._go_to_admin_dashboard)
         self._admin_restore.next_requested.connect(self._on_admin_restore_prepared)
         self._admin_create_backup.back_requested.connect(self._go_to_admin_dashboard)
-        self._admin_create_backup.start_backup_requested.connect(self._start_backup_creation)
+        self._admin_create_backup.continue_requested.connect(self._go_to_admin_create_backup_config)
+        self._admin_create_backup_config.back_requested.connect(self._go_to_admin_create_backup)
+        self._admin_create_backup_config.start_backup_requested.connect(self._start_backup_creation)
 
 
     # ------------------------------------------------------------------
@@ -283,6 +289,15 @@ class MainWindow(QMainWindow):
     def _start_admin_create_backup(self) -> None:
         """Start the backup creation flow in admin mode."""
         self._state.admin_mode = True
+        self._stack.navigate_to(_ADMIN_CREATE_BACKUP)
+
+    def _go_to_admin_create_backup_config(self, files: list[MergedFile], skip_media_exec: bool) -> None:
+        """Navigate to configuration screen for backup creation."""
+        self._admin_create_backup_config.setup(files, skip_media_exec)
+        self._stack.navigate_to(_ADMIN_CREATE_BACKUP_CONFIG)
+
+    def _go_to_admin_create_backup(self) -> None:
+        """Navigate back to folder selection screen."""
         self._stack.navigate_to(_ADMIN_CREATE_BACKUP)
 
     def _on_admin_restore_prepared(self) -> None:
@@ -525,8 +540,8 @@ class MainWindow(QMainWindow):
 
     def _start_backup_creation(self, files: list[MergedFile], dest_root: Path, skip_media_exec: bool) -> None:
         """Begin copying files to the backup target."""
-        self._progress.title.setText("Criando backup dos arquivos")
         self._progress.reset()
+        self._progress.title.setText("Criando backup dos arquivos")
         self._stack.navigate_to(_PROGRESS)
 
         self._backup_worker = CreateBackupWorker(files, dest_root, skip_media_exec)
@@ -557,7 +572,6 @@ class MainWindow(QMainWindow):
 
         # 2. Update summary view text details for backup
         from ui.assets import RM_GREEN, RM_RED, RM_YELLOW
-        from ui.format_utils import format_bytes as _format_bytes
         n_issues = len(result.skipped_files) + len(result.failed_files)
         if result.cancelled:
             self._summary._set_header_lbl("BACKUP CANCELADO", RM_RED, "O backup foi cancelado pelo usuário.")

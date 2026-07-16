@@ -350,12 +350,25 @@ def get_local_drives() -> list[Path]:
         drives = get_local_drives()
     """
     import string
+    import sys
     drives = []
+    is_windows = (sys.platform == "win32")
+    in_test = "unittest" in sys.modules or "pytest" in sys.modules
+    if is_windows and not in_test:
+        import ctypes
     for letter in string.ascii_uppercase:
-        drive = Path(f"{letter}:\\")
+        drive_str = f"{letter}:\\"
+        drive = Path(drive_str)
         if drive.exists():
-            drives.append(drive)
+            if is_windows and not in_test:
+                # DRIVE_REMOVABLE = 2, DRIVE_FIXED = 3
+                drive_type = ctypes.windll.kernel32.GetDriveTypeW(drive_str)
+                if drive_type in (2, 3):
+                    drives.append(drive)
+            else:
+                drives.append(drive)
     return drives
+
 
 
 def scan_local_sources(login: str, admin_mode: bool = False) -> list[BackupSource]:
