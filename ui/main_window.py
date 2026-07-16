@@ -32,6 +32,7 @@ from ui.views.summary_view import SummaryView
 from ui.views.about_view import AboutView
 from ui.views.admin_view import AdminView
 from ui.views.admin_restore_view import AdminRestoreView
+from ui.views.admin_create_backup_view import AdminCreateBackupView
 from ui.workers import (
     DiscoverSourcesWorker,
     MergeSourcesWorker,
@@ -39,6 +40,7 @@ from ui.workers import (
     CopySkippedWorker,
     BenchmarkWorker,
     AdminHelperWorker,
+    CreateBackupWorker,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,6 +54,7 @@ _SUMMARY = 4
 _ABOUT = 5
 _ADMIN = 6
 _ADMIN_RESTORE = 7
+_ADMIN_CREATE_BACKUP = 8
 
 
 
@@ -120,6 +123,7 @@ class MainWindow(QMainWindow):
         self._about = AboutView(self)
         self._admin = AdminView(self)
         self._admin_restore = AdminRestoreView(self)
+        self._admin_create_backup = AdminCreateBackupView(self)
 
         self._stack.add_view(self._welcome)
         self._stack.add_view(self._analysis)
@@ -129,6 +133,7 @@ class MainWindow(QMainWindow):
         self._stack.add_view(self._about)
         self._stack.add_view(self._admin)
         self._stack.add_view(self._admin_restore)
+        self._stack.add_view(self._admin_create_backup)
 
     def _connect_signals(self) -> None:
         """Wire view signals to navigation handlers.
@@ -151,8 +156,11 @@ class MainWindow(QMainWindow):
         self._about.back_requested.connect(self._go_to_welcome)
         self._admin.back_requested.connect(self._go_to_welcome)
         self._admin.restore_requested.connect(self._start_admin_restore)
+        self._admin.create_backup_requested.connect(self._start_admin_create_backup)
         self._admin_restore.back_requested.connect(self._go_to_admin_dashboard)
         self._admin_restore.next_requested.connect(self._on_admin_restore_prepared)
+        self._admin_create_backup.back_requested.connect(self._go_to_admin_dashboard)
+        self._admin_create_backup.start_backup_requested.connect(self._start_backup_creation)
 
 
     # ------------------------------------------------------------------
@@ -271,6 +279,11 @@ class MainWindow(QMainWindow):
         """Navigate back to the admin tool dashboard."""
         self._state.admin_mode = False
         self._stack.navigate_to(_ADMIN)
+
+    def _start_admin_create_backup(self) -> None:
+        """Start the backup creation flow in admin mode."""
+        self._state.admin_mode = True
+        self._stack.navigate_to(_ADMIN_CREATE_BACKUP)
 
     def _on_admin_restore_prepared(self) -> None:
         """Handle transition after admin restore files are compiled."""
@@ -444,6 +457,8 @@ class MainWindow(QMainWindow):
         """Forward cancel request to the active copy worker."""
         if hasattr(self, "_copy_worker"):
             self._copy_worker.request_cancel()
+        if hasattr(self, "_backup_worker"):
+            self._backup_worker.request_cancel()
 
     # ------------------------------------------------------------------
     # Skipped files copy
@@ -507,3 +522,72 @@ class MainWindow(QMainWindow):
             report_success("COPY_SKIPPED_TO_DESKTOP", details)
         else:
             report_failure("COPY_SKIPPED_TO_DESKTOP", "failed to copy skipped files", details)
+
+    def _start_backup_creation(self, files: list[MergedFile], dest_root: Path, skip_media_exec: bool) -> None:
+        """Begin copying files to the backup target."""
+        self._progress.title.setText("Criando backup dos arquivos")
+        self._progress.reset()
+        self._stack.navigate_to(_PROGRESS)
+
+        self._backup_worker = CreateBackupWorker(files, dest_root, skip_media_exec)
+        self._backup_worker.progress.connect(self._progress.update_progress)
+        self._backup_worker.finished.connect(self._on_backup_creation_finished)
+        self._workers.append(self._backup_worker)
+        self._backup_worker.start()
+
+        report_success("BACKUP_START", {
+            "file_count": len(files),
+            "dest_root": str(dest_root),
+            "skip_media_exec": skip_media_exec,
+        })
+
+    def _on_backup_creation_finished(self, result: CopyResult) -> None:
+        """Handle backup completion — navigate to summary."""
+        # 1. We must configure SummaryView titles for backup!
+        self._summary._files_card.update_content(
+            title="ARQUIVOS SALVOS",
+            value=f"{result.files_copied} arquivos",
+            subtitle="Backup concluído",
+        )
+        self._summary._bytes_card.update_content(
+            title="VOLUME DO BACKUP",
+            value=_format_bytes(result.bytes_copied),
+            subtitle="Tamanho total",
+        )
+
+        # 2. Update summary view text details for backup
+        from ui.assets import RM_GREEN, RM_RED, RM_YELLOW
+        from ui.format_utils import format_bytes as _format_bytes
+        n_issues = len(result.skipped_files) + len(result.failed_files)
+        if result.cancelled:
+            self._summary._set_header_lbl("BACKUP CANCELADO", RM_RED, "O backup foi cancelado pelo usuário.")
+        elif result.files_copied == 0:
+            self._summary._set_header_lbl("BACKUP FALHOU", RM_RED, "Nenhum arquivo pôde ser salvo.")
+        elif n_issues:
+            suffix = "arquivo pulado" if n_issues == 1 else "arquivos pulados"
+            self._summary._set_header_lbl(
+                "BACKUP PARCIAL", RM_YELLOW,
+                f"{result.files_copied} arquivos salvos, {n_issues} {suffix}.",
+            )
+        else:
+            self._summary._set_header_lbl("BACKUP CONCLUÍDO", RM_GREEN, "Todos os arquivos salvos com sucesso!")
+
+        self._summary._set_skipped_section(result)
+        self._summary._try_other_btn.setVisible(True)
+
+        self._state.copy_result = result
+        self._stack.navigate_to(_SUMMARY)
+
+        # Telemetry/Logging
+        details = {
+            "files_copied": result.files_copied,
+            "bytes_copied": result.bytes_copied,
+            "skipped_count": len(result.skipped_files),
+            "failed_count": len(result.failed_files),
+            "cancelled": result.cancelled,
+            "duration_seconds": result.duration_seconds,
+        }
+        if result.success:
+            report_success("BACKUP_COMPLETE", details)
+        else:
+            report_failure("BACKUP_FAILED", "backup failed or cancelled", details)

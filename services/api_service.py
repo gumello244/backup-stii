@@ -112,6 +112,38 @@ class ApiService:
                 exc,
             )
 
+    async def request_event(
+        self,
+        event_type: str,
+        status: str,
+        details: Optional[dict[str, object]] = None,
+    ) -> dict:
+        """Send a request event to the backend and return the response JSON dict.
+
+        Unlike _post_event, this raises exceptions on HTTP or transport failures.
+        """
+        if not self._base_url:
+            raise ValueError("Backend URL not configured")
+
+        payload_details = {**self._system_info, "session_id": self._session_id}
+        if details:
+            payload_details.update(details)
+
+        payload = {
+            "tool_name": get_app_name(),
+            "event": event_type,
+            "status": status,
+            "details": payload_details,
+            "user_login": self._get_user_login(),
+            "user_name": self._get_user_name(),
+            "device_ip": self._get_local_ip(),
+        }
+        resp = await self._client.post(
+            f"{self._base_url}/event", json=payload,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------

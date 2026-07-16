@@ -48,6 +48,7 @@ class AdminView(QWidget):
 
     back_requested = pyqtSignal()
     restore_requested = pyqtSignal()
+    create_backup_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -122,6 +123,7 @@ class AdminView(QWidget):
             "Criar um novo backup de usuário ou máquina no padrão da TI",
             0,
             1,
+            self._on_create_backup_clicked,
         )
         self._transfer_files_card = self._add_option_card(
             "Transferir arquivos",
@@ -163,3 +165,7 @@ class AdminView(QWidget):
     def _on_restore_clicked(self) -> None:
         """Handle click event for backup restore option."""
         self.restore_requested.emit()
+
+    def _on_create_backup_clicked(self) -> None:
+        """Handle click event for create backup option."""
+        self.create_backup_requested.emit()

@@ -445,3 +445,84 @@ class AdminSourceDetailRunnable(QRunnable):
             _report_worker_failure("ADMIN_SOURCE_DETAIL_FAILED", str(exc))
             self.signals.error.emit(str(exc))
             self.signals.finished.emit(self.source)
+
+
+class CreateOSWorker(ThreadedWorker):
+    finished = pyqtSignal(int)  # ticket_id or -1 on error
+
+    def __init__(self, hostname: str, user_login: str) -> None:
+        super().__init__()
+        self.hostname = hostname
+        self.user_login = user_login
+
+    def run(self) -> None:
+        try:
+            import asyncio
+            from services.api_service import ApiService
+            from config import get_api_config
+
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                api = ApiService(get_api_config())
+                details = {"device_hostname": self.hostname}
+                res = loop.run_until_complete(
+                    api.request_event("CREATE_OS", "SUCCESS", details)
+                )
+                ticket_id = res.get("ticket_id")
+                if ticket_id is not None:
+                    self.finished.emit(int(ticket_id))
+                else:
+                    self.finished.emit(-1)
+                loop.run_until_complete(api.close())
+            finally:
+                loop.close()
+        except Exception as exc:
+            logger.error('{"event":"create_os_worker_failed","error":"%s"}', exc)
+            self.finished.emit(-1)
+
+
+class CreateBackupWorker(ThreadedWorker):
+    progress = pyqtSignal(float, float, str)
+    finished = pyqtSignal(object)  # CopyResult
+
+    def __init__(
+        self,
+        files: list[MergedFile],
+        dest_root: Path,
+        skip_media_exec: bool = False,
+    ) -> None:
+        super().__init__()
+        self._files = files
+        self._dest_root = dest_root
+        self._skip_media_exec = skip_media_exec
+        self._cancel = Event()
+
+    def run(self) -> None:
+        try:
+            from services.backup_creator import backup_local_data
+            retry_cfg = get_copy_retry_config()
+
+            def on_progress(copied: int, total: int, name: str) -> None:
+                self.progress.emit(float(copied), float(total), name)
+
+            res = backup_local_data(
+                files=self._files,
+                dest_root=self._dest_root,
+                progress_cb=on_progress,
+                cancel_event=self._cancel,
+                retry_cfg=retry_cfg,
+                skip_media_exec=self._skip_media_exec,
+            )
+            self.finished.emit(res)
+        except Exception as exc:
+            logger.error('{"event":"backup_worker_failed","error":"%s"}', exc)
+            _report_worker_failure("BACKUP_FAILED", str(exc))
+            self.error.emit(str(exc))
+            self.finished.emit(CopyResult(
+                success=False, files_copied=0, bytes_copied=0,
+                cancelled=False,
+            ))
+
+    def request_cancel(self) -> None:
+        self._cancel.set()
