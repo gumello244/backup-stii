@@ -12,7 +12,7 @@ python -m nuitka ^
     --windows-console-mode="disable" ^
     --windows-icon-from-ico="ui\assets\icon.ico" ^
     --include-data-dir="ui\assets"="ui\assets" ^
-    --output-dir="dist-nuitka" ^
+    --output-dir="dist/nuitka" ^
     --output-filename="Remos.exe" ^
     main.py
 

@@ -5,6 +5,9 @@ call venv\Scripts\activate.bat
 REM Run pyinstaller from the venv
 python -m PyInstaller --noconfirm --clean --onedir --windowed ^
   --name "Remos" ^
+  --distpath "dist/pyinstaller" ^
+  --workpath "build/pyinstaller" ^
+  --specpath "build/pyinstaller" ^
   --add-data "ui/assets;ui/assets" ^
   --icon "ui/assets/icon.ico" ^
   --version-file=version.txt main.py
