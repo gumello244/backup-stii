@@ -33,7 +33,7 @@ class TestConfig(unittest.TestCase):
         with patch("config.app_secrets", None):
             cfg = config.get_api_config()
             self.assertEqual(cfg.url, "")
-            self.assertEqual(cfg.app_version, "1.0.0")
+            self.assertEqual(cfg.app_version, "0.0.2")
 
     def test_get_copy_retry_config_defaults(self) -> None:
         """Verify copy retry settings default mapping."""

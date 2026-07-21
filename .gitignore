@@ -10,9 +10,8 @@ __pycache__/
 .Python
 build/
 develop-eggs/
-dist/
-dist2/
-dist-nuitka/
+dist/nuitka
+dist/pyinstaller
 downloads/
 eggs/
 .eggs/

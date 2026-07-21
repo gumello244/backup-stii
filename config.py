@@ -11,6 +11,9 @@ Example:
 """
 from dataclasses import dataclass
 
+APP_VERSION = "0.0.2"
+BUILD_NUMBER = 2
+
 # ------------------------------------------------------------------
 # Benchmark / speed estimation constants
 # ------------------------------------------------------------------
@@ -137,7 +140,7 @@ def get_api_config() -> ApiConfig:
     """Factory for API telemetry configuration."""
     return ApiConfig(
         url=_get_secret("BACKEND_URL"),
-        app_version=_get_secret("APP_VERSION", "1.0.0"),
+        app_version=_get_secret("APP_VERSION", APP_VERSION),
     )
 
 
